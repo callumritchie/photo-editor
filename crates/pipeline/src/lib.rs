@@ -54,6 +54,43 @@ pub fn render_draft(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, R
     }
 }
 
+/// Reduce a frame once for interactive editing: superpixel (no demosaic), then an integer box
+/// downscale so the long edge is no smaller than `long_edge`. The result is a small linear-RGB frame
+/// that [`render`] processes quickly on every slider change.
+pub fn prepare_preview(frame: &RawFrame, long_edge: usize) -> RawFrame {
+    let base = match &frame.layout {
+        Layout::Mosaic(cfa) => superpixel(frame, cfa),
+        Layout::LinearRgb => frame.clone(),
+    };
+    let factor = (base.width.max(base.height) / long_edge.max(1)).max(1);
+    if factor == 1 {
+        return base;
+    }
+    let (w, h) = (base.width / factor, base.height / factor);
+    let mut data = vec![0.0f32; w * h * 3];
+    data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let mut acc = [0.0f32; 3];
+            for dy in 0..factor {
+                let src = ((y * factor + dy) * base.width + x * factor) * 3;
+                for px in base.data[src..src + factor * 3].chunks(3) {
+                    acc[0] += px[0];
+                    acc[1] += px[1];
+                    acc[2] += px[2];
+                }
+            }
+            let n = (factor * factor) as f32;
+            row[x * 3..x * 3 + 3].copy_from_slice(&[acc[0] / n, acc[1] / n, acc[2] / n]);
+        }
+    });
+    RawFrame {
+        width: w,
+        height: h,
+        data,
+        ..base.clone_header()
+    }
+}
+
 fn superpixel(frame: &RawFrame, cfa: &pe_raw::Cfa) -> RawFrame {
     let block = if cfa.width == 2 && cfa.height == 2 {
         2

@@ -1093,6 +1093,7 @@ version = "0.0.1"
 dependencies = [
  "image",
  "pe-catalog",
+ "pe-develop",
  "pe-pipeline",
  "pe-preview",
  "pe-raw",

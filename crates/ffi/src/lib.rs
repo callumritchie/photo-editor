@@ -303,6 +303,184 @@ pub unsafe extern "C" fn pe_render(
     rgba_out(pe_preview::fit(&img, long_edge), w, h)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Develop
+
+/// Slider schema for building UIs: `{"params":[...],"temperature":{...},"tint":{...},"groups":[{"id","label"}]}`.
+#[no_mangle]
+pub extern "C" fn pe_develop_schema_json() -> *mut c_char {
+    let groups: Vec<_> = pe_develop::Group::ALL
+        .iter()
+        .map(|g| serde_json::json!({ "id": g, "label": g.label(), "look": pe_develop::Group::LOOK.contains(g) }))
+        .collect();
+    json_out(&serde_json::json!({
+        "params": pe_develop::PARAMS,
+        "temperature": pe_develop::TEMPERATURE,
+        "tint": pe_develop::TINT,
+        "groups": groups,
+    }))
+}
+
+/// Develop state (settings, history, snapshots) of one image as JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_develop_state_json(h: *mut PeCatalog, id: i64) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    match c.inner.lock().unwrap().develop_state(id) {
+        Ok(s) => json_out(&s),
+        Err(e) => error_out(e),
+    }
+}
+
+/// Run a develop command (JSON, see `DevelopCommand`) on `count` images. Returns their new states.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_develop_json(
+    h: *mut PeCatalog,
+    ids: *const i64,
+    count: usize,
+    command_json: *const c_char,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    if ids.is_null() {
+        return error_out("no images");
+    }
+    let cmd: pe_catalog::DevelopCommand = match str_in(command_json).map(serde_json::from_str) {
+        Some(Ok(c)) => c,
+        Some(Err(e)) => return error_out(e),
+        None => return error_out("missing command"),
+    };
+    match c
+        .inner
+        .lock()
+        .unwrap()
+        .develop_execute(std::slice::from_raw_parts(ids, count), &cmd)
+    {
+        Ok(s) => json_out(&s),
+        Err(e) => error_out(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_presets_json(h: *mut PeCatalog) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    match c.inner.lock().unwrap().presets() {
+        Ok(p) => json_out(&p),
+        Err(e) => error_out(e),
+    }
+}
+
+/// Save (or replace by name) a preset. `groups_json`: JSON array of group ids.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_save_preset_json(
+    h: *mut PeCatalog,
+    name: *const c_char,
+    groups_json: *const c_char,
+    settings_json: *const c_char,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    let groups: Vec<pe_develop::Group> = match str_in(groups_json).map(serde_json::from_str) {
+        Some(Ok(g)) => g,
+        _ => return error_out("bad groups"),
+    };
+    let settings: pe_pipeline::Settings = match str_in(settings_json).map(serde_json::from_str) {
+        Some(Ok(s)) => s,
+        _ => return error_out("bad settings"),
+    };
+    match c
+        .inner
+        .lock()
+        .unwrap()
+        .save_preset(str_in(name).unwrap_or(""), &groups, &settings)
+    {
+        Ok(p) => json_out(&p),
+        Err(e) => error_out(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_delete_preset(h: *mut PeCatalog, id: i64) -> bool {
+    let Some(c) = catalog(h) else { return false };
+    c.inner.lock().unwrap().delete_preset(id).is_ok()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Interactive preview image
+
+/// A raw file decoded once and reduced for fast re-rendering while editing.
+pub struct PeImage {
+    preview: pe_raw::RawFrame,
+    as_shot: Option<(f32, f32)>,
+}
+
+/// Decode `path` and prepare a preview whose long edge is at least `long_edge` (where the file allows).
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_open(path: *const c_char, long_edge: u32) -> *mut PeImage {
+    let Some(p) = str_in(path) else {
+        return ptr::null_mut();
+    };
+    let Ok(frame) = pe_raw::decode_file(p) else {
+        return ptr::null_mut();
+    };
+    let as_shot = pe_pipeline::wb::temperature_of(&frame.xyz_to_cam, frame.wb);
+    let preview = pe_pipeline::prepare_preview(&frame, long_edge as usize);
+    Box::into_raw(Box::new(PeImage { preview, as_shot }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_close(h: *mut PeImage) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
+    }
+}
+
+/// `{"width","height","asShotTemperature","asShotTint"}` of the prepared preview.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_info_json(h: *mut PeImage) -> *mut c_char {
+    let Some(img) = h.as_ref() else {
+        return error_out("null image");
+    };
+    json_out(&serde_json::json!({
+        "width": img.preview.width,
+        "height": img.preview.height,
+        "asShotTemperature": img.as_shot.map(|t| t.0),
+        "asShotTint": img.as_shot.map(|t| t.1),
+    }))
+}
+
+/// Render the prepared preview with `settings_json` (NULL = defaults). RGBA8; free with
+/// `pe_bytes_free(ptr, w*h*4)`.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_render(
+    h: *mut PeImage,
+    settings_json: *const c_char,
+    w: *mut u32,
+    hh: *mut u32,
+) -> *mut u8 {
+    let Some(img) = h.as_ref() else {
+        return ptr::null_mut();
+    };
+    let settings: pe_pipeline::Settings =
+        match str_in(settings_json).map(serde_json::from_str).transpose() {
+            Ok(s) => s.unwrap_or_default(),
+            Err(_) => return ptr::null_mut(),
+        };
+    let Ok(out) = pe_pipeline::render(&img.preview, &settings) else {
+        return ptr::null_mut();
+    };
+    let data = out.data.iter().map(|v| (v * 255.0 + 0.5) as u8).collect();
+    let Some(rgb) = image::RgbImage::from_raw(out.width as u32, out.height as u32, data) else {
+        return ptr::null_mut();
+    };
+    rgba_out(rgb, w, hh)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pe_string_free(s: *mut c_char) {
     if !s.is_null() {
@@ -360,7 +538,59 @@ mod tests {
             let jpeg = pe_catalog_thumbnail(h, id, &mut len);
             assert!(!jpeg.is_null() && len > 100);
             pe_bytes_free(jpeg, len);
+
+            // Develop: set, then undo, via JSON commands.
+            let cmd = CString::new(r#"{"command":"set","settings":{"exposure":0.7}}"#).unwrap();
+            let states: serde_json::Value =
+                serde_json::from_str(&take(pe_catalog_develop_json(h, &id, 1, cmd.as_ptr())))
+                    .unwrap();
+            assert_eq!(states[0]["settings"]["exposure"], 0.7);
+            assert_eq!(states[0]["canUndo"], true);
+            let undo = CString::new(r#"{"command":"undo"}"#).unwrap();
+            let states: serde_json::Value =
+                serde_json::from_str(&take(pe_catalog_develop_json(h, &id, 1, undo.as_ptr())))
+                    .unwrap();
+            assert_eq!(states[0]["edited"], false);
+            let bad = CString::new(r#"{"command":"nope"}"#).unwrap();
+            assert!(take(pe_catalog_develop_json(h, &id, 1, bad.as_ptr())).contains("error"));
+
+            // Presets and schema.
+            let name = CString::new("Bright").unwrap();
+            let groups = CString::new(r#"["exposure"]"#).unwrap();
+            let settings = CString::new(r#"{"exposure":1.0}"#).unwrap();
+            let p = take(pe_catalog_save_preset_json(
+                h,
+                name.as_ptr(),
+                groups.as_ptr(),
+                settings.as_ptr(),
+            ));
+            assert!(p.contains("\"name\":\"Bright\""), "{p}");
+            assert!(take(pe_catalog_presets_json(h)).contains("Bright"));
+            let schema = take(pe_develop_schema_json());
+            assert!(schema.contains("\"key\":\"exposure\"") && schema.contains("whiteBalance"));
             pe_catalog_close(h);
+        }
+    }
+
+    #[test]
+    fn preview_image_renders_faster_and_reports_white_balance() {
+        let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/raw/Nikon-D750.nef");
+        if !raw.exists() {
+            return;
+        }
+        unsafe {
+            let p = CString::new(raw.to_str().unwrap()).unwrap();
+            let img = pe_image_open(p.as_ptr(), 1024);
+            assert!(!img.is_null());
+            let info: serde_json::Value =
+                serde_json::from_str(&take(pe_image_info_json(img))).unwrap();
+            assert!(info["asShotTemperature"].as_f64().unwrap() > 2000.0);
+            let (mut w, mut hh) = (0u32, 0u32);
+            let px = pe_image_render(img, ptr::null(), &mut w, &mut hh);
+            assert!(!px.is_null() && w >= 1024 && hh > 0);
+            pe_bytes_free(px, (w * hh * 4) as usize);
+            pe_image_close(img);
         }
     }
 }

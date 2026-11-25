@@ -27,6 +27,21 @@ uint8_t *pe_catalog_thumbnail(PeCatalog *h, int64_t id, size_t *out_len);
 uint8_t *pe_quick_image(const char *path, uint8_t orientation, uint32_t long_edge, uint32_t *w, uint32_t *h);
 uint8_t *pe_render(const char *path, const char *settings_json, uint32_t long_edge, uint32_t *w, uint32_t *h);
 
+/* Develop */
+char *pe_develop_schema_json(void);
+char *pe_catalog_develop_state_json(PeCatalog *h, int64_t id);
+char *pe_catalog_develop_json(PeCatalog *h, const int64_t *ids, size_t count, const char *command_json);
+char *pe_catalog_presets_json(PeCatalog *h);
+char *pe_catalog_save_preset_json(PeCatalog *h, const char *name, const char *groups_json, const char *settings_json);
+bool pe_catalog_delete_preset(PeCatalog *h, int64_t id);
+
+/* Interactive preview: decode once, re-render quickly with new settings */
+typedef struct PeImage PeImage;
+PeImage *pe_image_open(const char *path, uint32_t long_edge);
+void pe_image_close(PeImage *h);
+char *pe_image_info_json(PeImage *h);
+uint8_t *pe_image_render(PeImage *h, const char *settings_json, uint32_t *w, uint32_t *hh);
+
 void pe_string_free(char *s);
 void pe_bytes_free(uint8_t *p, size_t len);
 
