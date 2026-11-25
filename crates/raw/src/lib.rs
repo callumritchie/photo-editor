@@ -96,6 +96,23 @@ pub struct RawFrame {
     pub orientation: u8,
 }
 
+impl RawFrame {
+    /// A copy of everything except the pixel data (which is left empty).
+    pub fn clone_header(&self) -> RawFrame {
+        RawFrame {
+            make: self.make.clone(),
+            model: self.model.clone(),
+            width: self.width,
+            height: self.height,
+            layout: self.layout.clone(),
+            data: Vec::new(),
+            wb: self.wb,
+            xyz_to_cam: self.xyz_to_cam,
+            orientation: self.orientation,
+        }
+    }
+}
+
 /// Decode a raw file from disk.
 pub fn decode_file(path: impl AsRef<Path>) -> Result<RawFrame, RawError> {
     let img = rawler::decode_file(path.as_ref()).map_err(|e| RawError::Decoder(e.to_string()))?;

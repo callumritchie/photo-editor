@@ -42,6 +42,51 @@ pub enum RenderError {
     SingularMatrix,
 }
 
+/// Fast reduced-resolution render for previews and thumbnails.
+///
+/// Mosaic sensors are first reduced by averaging each CFA tile (2x2 for Bayer, 3x3 blocks otherwise)
+/// into one RGB pixel ("superpixel"), which needs no demosaic and quarters (or ninths) the work. The
+/// result then goes through the normal pipeline, so it matches a full render apart from resolution.
+pub fn render_draft(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
+    match &frame.layout {
+        Layout::Mosaic(cfa) => render(&superpixel(frame, cfa), settings),
+        Layout::LinearRgb => render(frame, settings),
+    }
+}
+
+fn superpixel(frame: &RawFrame, cfa: &pe_raw::Cfa) -> RawFrame {
+    let block = if cfa.width == 2 && cfa.height == 2 {
+        2
+    } else {
+        3
+    };
+    let (w, h) = (frame.width / block, frame.height / block);
+    let mut data = vec![0.0f32; w * h * 3];
+    data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let (mut sum, mut n) = ([0.0f32; 3], [0u32; 3]);
+            for dy in 0..block {
+                for dx in 0..block {
+                    let (yy, xx) = (y * block + dy, x * block + dx);
+                    let c = cfa.color_at(yy, xx) as usize;
+                    sum[c] += frame.data[yy * frame.width + xx];
+                    n[c] += 1;
+                }
+            }
+            for c in 0..3 {
+                row[x * 3 + c] = if n[c] > 0 { sum[c] / n[c] as f32 } else { 0.0 };
+            }
+        }
+    });
+    RawFrame {
+        width: w,
+        height: h,
+        layout: Layout::LinearRgb,
+        data,
+        ..frame.clone_header()
+    }
+}
+
 /// Render to display-referred, sRGB-encoded values in [0, 1].
 pub fn render(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
     let settings = settings.clone().clamped();
@@ -195,5 +240,33 @@ mod tests {
             reconstruct_highlights([0.25, 0.5, 0.5], [2.0, 1.0, 1.5]),
             [0.5, 0.5, 0.75]
         );
+    }
+
+    #[test]
+    fn draft_render_halves_bayer_and_matches_full_render_on_flat_field() {
+        let cfa = pe_raw::Cfa::bayer("RGGB").unwrap();
+        let (w, h) = (64, 48);
+        let rgb = [0.2f32, 0.4, 0.3];
+        let data = (0..w * h)
+            .map(|i| rgb[cfa.color_at(i / w, i % w) as usize])
+            .collect();
+        let frame = RawFrame {
+            make: "Test".into(),
+            model: "Flat".into(),
+            width: w,
+            height: h,
+            layout: Layout::Mosaic(cfa),
+            data,
+            wb: [1.5, 1.0, 1.8],
+            xyz_to_cam: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            orientation: 1,
+        };
+        let s = Settings::default();
+        let draft = render_draft(&frame, &s).unwrap();
+        let full = render(&frame, &s).unwrap();
+        assert_eq!((draft.width, draft.height), (32, 24));
+        for c in 0..3 {
+            assert!((draft.data[c] - full.data[c]).abs() < 1e-4, "channel {c}");
+        }
     }
 }

@@ -63,15 +63,15 @@ fn to_image(rgb: Rgb8) -> Result<RgbImage, PreviewError> {
     RgbImage::from_raw(rgb.width, rgb.height, rgb.data).ok_or(PreviewError::NoPreview)
 }
 
-/// Full pipeline render (fast demosaic, default settings) as 8-bit sRGB, oriented.
+/// Draft pipeline render (reduced resolution, default settings) as 8-bit sRGB, oriented.
 pub fn render_fallback(path: &Path) -> Result<RgbImage, PreviewError> {
     let frame = pe_raw::decode_file(path)?;
     let settings = pe_pipeline::Settings {
         demosaic: pe_pipeline::Demosaic::Fast,
         ..Default::default()
     };
-    let out =
-        pe_pipeline::render(&frame, &settings).map_err(|e| PreviewError::Render(e.to_string()))?;
+    let out = pe_pipeline::render_draft(&frame, &settings)
+        .map_err(|e| PreviewError::Render(e.to_string()))?;
     let data = out.data.iter().map(|v| (v * 255.0 + 0.5) as u8).collect();
     RgbImage::from_raw(out.width as u32, out.height as u32, data).ok_or(PreviewError::NoPreview)
 }
@@ -87,7 +87,12 @@ pub fn fit(img: &RgbImage, long_edge: u32) -> RgbImage {
         ((w as f32 * s).round() as u32).max(1),
         ((h as f32 * s).round() as u32).max(1),
     );
-    image::imageops::resize(img, nw, nh, FilterType::Triangle)
+    if s < 0.25 {
+        // Large reductions: fast box-sampling, which also averages away aliasing.
+        image::imageops::thumbnail(img, nw, nh)
+    } else {
+        image::imageops::resize(img, nw, nh, FilterType::Triangle)
+    }
 }
 
 /// Encode RGB as baseline JPEG.

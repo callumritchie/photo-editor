@@ -1,14 +1,15 @@
 # photo-editor
 
-An experimental, non-destructive raw photo editor and photo library for macOS. It has a Rust core with a SwiftUI shell
-(the shell is planned).
+An experimental, non-destructive raw photo editor and photo library for macOS. It has a Rust core and a SwiftUI shell.
 
 This is a personal, non-commercial project, built in the open for learning. It is not a product and not affiliated with any camera or
 software vendor.
 
 ## Status
 
-**M2 (raw to a pleasing image) done.** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
+**M0, M1 and M2 done.** There is a working Mac app (photo library, import, grid, loupe), and the core decodes and renders raws.
+
+**Rendering (M2).** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
 and renders them on the CPU:
 
 black/white levels → edge-directed demosaic with false-colour suppression → white balance (as-shot, auto, or temperature/tint) with
@@ -35,6 +36,22 @@ cargo test --workspace --release      # unit tests, sample renders, golden-image
 Golden images (`fixtures/golden/`) are small renders of the CC0 samples. After an intended visual change, re-baseline with
 `PE_UPDATE_GOLDEN=1 cargo test --release -p pe-cli --test golden` and review the diff.
 
+## Mac app (M1)
+
+```sh
+app/build.sh                      # builds the Rust core + SwiftUI shell into app/build/PhotoEditor.app
+open app/build/PhotoEditor.app    # library defaults to ~/Pictures/PhotoEditor Library.pecat
+open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another library
+```
+
+- **Import** (⇧⌘I) a folder: *Add* catalogs files in place; *Copy* puts them into dated folders (e.g. `%Y/%Y-%m-%d`).
+  Suspected duplicates are skipped. Imports are crash-safe and resumable.
+- **Grid:** folders in the sidebar, rating filter, thumbnail size. Keys: `0`–`5` rating, `P` pick, `X` reject, `U` unflag,
+  `6`–`9` red/yellow/green/blue label, arrows to move, `Return`/`Space` to open in the loupe.
+- **Loupe:** shows the camera's embedded preview immediately, then the full render from our own pipeline. `Esc` returns to the grid.
+
+Command-line equivalents: `pe new`, `pe import [--copy-to DIR --template "%Y/%Y-%m-%d"]`, `pe ls`, `pe folders`, `pe thumb`.
+
 ## Layout
 
 | Crate | Purpose |
@@ -42,10 +59,12 @@ Golden images (`fixtures/golden/`) are small renders of the CC0 samples. After a
 | `crates/raw` (`pe-raw`) | Raw decoding into a decoder-independent `RawFrame` |
 | `crates/colour` (`pe-colour`) | Matrix maths, primaries, transfer functions, camera → output colour |
 | `crates/pipeline` (`pe-pipeline`) | CPU reference render pipeline (demosaic and later stages) |
-| `crates/catalog` (`pe-catalog`) | Photo library database (M1) |
-| `crates/preview` (`pe-preview`) | Preview cache (M4) |
+| `crates/catalog` (`pe-catalog`) | Photo library: SQLite catalog, import, queries, ratings/flags/labels |
+| `crates/preview` (`pe-preview`) | Thumbnails and quick previews; rendered preview cache comes in M4 |
 | `crates/export` (`pe-export`) | Export (M5) |
+| `crates/ffi` (`pe-ffi`) | C interface used by the Mac app |
 | `crates/cli` (`pe`) | Development command-line tool |
+| `app/` | SwiftUI Mac app (Swift package + `build.sh`) |
 
 ## Principles
 

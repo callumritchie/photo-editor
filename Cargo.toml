@@ -17,6 +17,7 @@ pe-pipeline = { path = "crates/pipeline" }
 pe-colour = { path = "crates/colour" }
 pe-preview = { path = "crates/preview" }
 pe-export = { path = "crates/export" }
+pe-ffi = { path = "crates/ffi" }
 rawler = "0.8"
 tiff = "0.11"
 rayon = "1"

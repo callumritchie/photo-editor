@@ -1,0 +1,4 @@
+module CPeFFI [system] {
+    header "../../../crates/ffi/include/pe_ffi.h"
+    export *
+}

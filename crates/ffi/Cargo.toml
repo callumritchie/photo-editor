@@ -1,0 +1,22 @@
+[package]
+name = "pe-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+pe-catalog.workspace = true
+pe-pipeline.workspace = true
+pe-preview.workspace = true
+pe-raw.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

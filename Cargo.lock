@@ -1028,6 +1028,20 @@ name = "pe-export"
 version = "0.0.1"
 
 [[package]]
+name = "pe-ffi"
+version = "0.0.1"
+dependencies = [
+ "image",
+ "pe-catalog",
+ "pe-pipeline",
+ "pe-preview",
+ "pe-raw",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "pe-pipeline"
 version = "0.0.1"
 dependencies = [

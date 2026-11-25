@@ -1,0 +1,33 @@
+/* C interface to the photo-editor core (crates/ffi). See crates/ffi/src/lib.rs for details.
+ * Strings: NUL-terminated UTF-8; free returned strings with pe_string_free.
+ * Buffers: free with pe_bytes_free(ptr, len). JSON errors look like {"error":"..."}. */
+#ifndef PE_FFI_H
+#define PE_FFI_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct PeCatalog PeCatalog;
+typedef void (*PeProgressFn)(void *ctx, uint64_t done, uint64_t total);
+
+PeCatalog *pe_catalog_open(const char *path, bool create, char **err_out);
+void pe_catalog_close(PeCatalog *h);
+
+char *pe_catalog_folders_json(PeCatalog *h);
+char *pe_catalog_images_json(PeCatalog *h, const char *query_json);
+char *pe_catalog_import_json(PeCatalog *h, const char *sources_json, const char *options_json,
+                             PeProgressFn progress, void *ctx);
+
+bool pe_catalog_set_rating(PeCatalog *h, const int64_t *ids, size_t count, uint8_t rating);
+bool pe_catalog_set_flag(PeCatalog *h, const int64_t *ids, size_t count, int8_t flag);
+bool pe_catalog_set_label(PeCatalog *h, const int64_t *ids, size_t count, const char *label);
+
+uint8_t *pe_catalog_thumbnail(PeCatalog *h, int64_t id, size_t *out_len);
+uint8_t *pe_quick_image(const char *path, uint8_t orientation, uint32_t long_edge, uint32_t *w, uint32_t *h);
+uint8_t *pe_render(const char *path, const char *settings_json, uint32_t long_edge, uint32_t *w, uint32_t *h);
+
+void pe_string_free(char *s);
+void pe_bytes_free(uint8_t *p, size_t len);
+
+#endif
