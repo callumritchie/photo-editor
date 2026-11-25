@@ -49,6 +49,8 @@ PeImage *pe_image_open(const char *path, uint32_t long_edge);
 void pe_image_close(PeImage *h);
 char *pe_image_info_json(PeImage *h);
 uint8_t *pe_image_render(PeImage *h, const char *settings_json, uint32_t *w, uint32_t *hh);
+/* "Apple M1 (Metal)" or "CPU": the renderer used by pe_image_render. */
+char *pe_renderer_name(void);
 
 void pe_string_free(char *s);
 void pe_bytes_free(uint8_t *p, size_t len);

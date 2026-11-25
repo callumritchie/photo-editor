@@ -13,6 +13,7 @@ crate-type = ["staticlib", "rlib"]
 pe-catalog.workspace = true
 pe-develop.workspace = true
 pe-export.workspace = true
+pe-gpu.workspace = true
 pe-pipeline.workspace = true
 pe-preview.workspace = true
 pe-raw.workspace = true

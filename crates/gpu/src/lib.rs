@@ -55,6 +55,7 @@ pub struct Gpu {
     layout: wgpu::BindGroupLayout,
     pipelines: Vec<wgpu::ComputePipeline>,
     name: String,
+    warmed: std::sync::atomic::AtomicBool,
 }
 
 /// A frame resident on the GPU, with scratch buffers for rendering it.
@@ -186,6 +187,7 @@ impl Gpu {
             layout,
             pipelines,
             name: format!("{} ({:?})", info.name, info.backend),
+            warmed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -280,6 +282,17 @@ impl Gpu {
             readback,
             bind_group,
             busy: Mutex::new(()),
+        })
+        .inspect(|f| {
+            // The first dispatch of each pipeline pays a one-off driver cost (~70 ms on an M1). Pay it
+            // here, during loading, rather than on the first slider movement.
+            if !self.warmed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let s = Settings {
+                    shadows: 1.0,
+                    ..Default::default()
+                };
+                let _ = self.render(f, &s);
+            }
         })
     }
 

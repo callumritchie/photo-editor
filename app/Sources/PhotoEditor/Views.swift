@@ -305,7 +305,11 @@ struct LoupeImage: View {
                     .lineLimit(1).truncationMode(.tail).foregroundStyle(.white.opacity(0.85))
                 Spacer(minLength: 8)
                 Text(String(repeating: "★", count: currentRating)).foregroundStyle(.yellow)
-                if let ms = model.lastRenderMs { Text("\(ms) ms").font(.caption).foregroundStyle(.secondary) }
+                if let ms = model.lastRenderMs {
+                    Text("\(ms) ms · \(Core.rendererName == "CPU" ? "CPU" : "GPU")")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help("Preview renderer: \(Core.rendererName)")
+                }
                 if model.loading { ProgressView().controlSize(.small) }
             }
             .font(.callout)

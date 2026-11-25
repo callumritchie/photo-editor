@@ -125,6 +125,13 @@ private func decodeOwned<T: Decodable>(_ p: UnsafeMutablePointer<CChar>?) throws
 }
 
 extension Core {
+    /// Renderer used for live previews: the GPU's name (e.g. "Apple M1 (Metal)") or "CPU".
+    static let rendererName: String = {
+        guard let p = pe_renderer_name() else { return "CPU" }
+        defer { pe_string_free(p) }
+        return String(cString: p)
+    }()
+
     func developState(_ id: Int64) throws -> DevelopState {
         try decodeOwned(pe_catalog_develop_state_json(handlePointer, id))
     }

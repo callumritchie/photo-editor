@@ -417,6 +417,24 @@ pub unsafe extern "C" fn pe_catalog_delete_preset(h: *mut PeCatalog, id: i64) ->
 pub struct PeImage {
     preview: pe_raw::RawFrame,
     as_shot: Option<(f32, f32)>,
+    gpu: Option<pe_gpu::GpuFrame>,
+}
+
+/// The process-wide GPU, initialised on first use (`None` when unavailable or `PE_NO_GPU` is set).
+fn gpu() -> Option<&'static pe_gpu::Gpu> {
+    static GPU: std::sync::OnceLock<Option<pe_gpu::Gpu>> = std::sync::OnceLock::new();
+    GPU.get_or_init(pe_gpu::Gpu::new).as_ref()
+}
+
+/// Name of the renderer used for interactive previews, e.g. "Apple M1 (Metal)" or "CPU".
+#[no_mangle]
+pub extern "C" fn pe_renderer_name() -> *mut c_char {
+    let name = gpu()
+        .map(|g| g.name().to_string())
+        .unwrap_or_else(|| "CPU".into());
+    CString::new(name)
+        .map(CString::into_raw)
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Export images. `settings_json` is an ExportSettings object (missing fields take defaults).
@@ -520,7 +538,12 @@ pub unsafe extern "C" fn pe_image_open(path: *const c_char, long_edge: u32) -> *
     };
     let as_shot = pe_pipeline::wb::temperature_of(&frame.xyz_to_cam, frame.wb);
     let preview = pe_pipeline::prepare_preview(&frame, long_edge as usize);
-    Box::into_raw(Box::new(PeImage { preview, as_shot }))
+    let gpu = gpu().and_then(|g| g.upload(&preview).ok());
+    Box::into_raw(Box::new(PeImage {
+        preview,
+        as_shot,
+        gpu,
+    }))
 }
 
 #[no_mangle]
@@ -541,6 +564,7 @@ pub unsafe extern "C" fn pe_image_info_json(h: *mut PeImage) -> *mut c_char {
         "height": img.preview.height,
         "asShotTemperature": img.as_shot.map(|t| t.0),
         "asShotTint": img.as_shot.map(|t| t.1),
+        "gpu": img.gpu.is_some(),
     }))
 }
 
@@ -561,6 +585,18 @@ pub unsafe extern "C" fn pe_image_render(
             Ok(s) => s.unwrap_or_default(),
             Err(_) => return ptr::null_mut(),
         };
+    if let (Some(g), Some(frame)) = (gpu(), &img.gpu) {
+        if let Ok((ow, oh, rgba)) = g.render(frame, &settings) {
+            if !w.is_null() {
+                *w = ow;
+            }
+            if !hh.is_null() {
+                *hh = oh;
+            }
+            return bytes_out(rgba, ptr::null_mut());
+        }
+        // Fall through to the CPU if the GPU fails (e.g. device lost).
+    }
     let Ok(out) = pe_pipeline::render(&img.preview, &settings) else {
         return ptr::null_mut();
     };

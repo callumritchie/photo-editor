@@ -4,6 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export MACOSX_DEPLOYMENT_TARGET=14.0
 cargo build --release -p pe-ffi
+# SwiftPM does not track the Rust static library, so force a relink to pick up core changes.
+rm -f app/.build/release/PhotoEditor
 swift build -c release --package-path app
 APP=app/build/PhotoEditor.app
 rm -rf "$APP"

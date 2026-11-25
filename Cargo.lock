@@ -1536,6 +1536,7 @@ dependencies = [
  "pe-catalog",
  "pe-develop",
  "pe-export",
+ "pe-gpu",
  "pe-pipeline",
  "pe-preview",
  "pe-raw",

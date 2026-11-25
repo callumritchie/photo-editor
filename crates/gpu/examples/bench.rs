@@ -15,6 +15,9 @@ fn main() {
     let t = Instant::now();
     let gf = gpu.upload(&preview).unwrap();
     println!("upload {}x{}: {:.1?}", gf.width(), gf.height(), t.elapsed());
+    let t = Instant::now();
+    gpu.render(&gf, &Settings::default()).unwrap();
+    println!("first render (includes warm-up): {:.1?}", t.elapsed());
     for (label, s) in [
         ("defaults", Settings::default()),
         (
