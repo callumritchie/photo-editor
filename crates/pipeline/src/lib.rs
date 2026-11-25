@@ -9,7 +9,7 @@
 //! 6. Rec.2020 -> linear sRGB, gamut mapping, sRGB encoding
 //! 7. point curve (encoded values), orientation
 //!
-//! A GPU implementation of each stage will be verified against this path (milestone M4).
+//! `pe-gpu` implements the same stages for linear-RGB frames and is tested against this path.
 
 pub mod demosaic;
 pub mod filter;

@@ -4,6 +4,8 @@
 |---|---|---|
 | [rawler](https://github.com/dnglab/dnglab) | Raw file decoding | LGPL-2.1 (compatible with this project's GPL-3.0-or-later) |
 | [tiff](https://github.com/image-rs/image-tiff) | TIFF writing | MIT |
+| [wgpu](https://github.com/gfx-rs/wgpu) | GPU compute (Metal on macOS) | MIT / Apache-2.0 |
+| [pollster](https://github.com/zesterer/pollster), [bytemuck](https://github.com/Lokathor/bytemuck) | Blocking on GPU setup; GPU buffer layout | MIT / Apache-2.0 (bytemuck also Zlib) |
 | [rayon](https://github.com/rayon-rs/rayon) | Parallelism | MIT / Apache-2.0 |
 | [clap](https://github.com/clap-rs/clap) | CLI parsing | MIT / Apache-2.0 |
 | [thiserror](https://github.com/dtolnay/thiserror), [anyhow](https://github.com/dtolnay/anyhow) | Error handling | MIT / Apache-2.0 |

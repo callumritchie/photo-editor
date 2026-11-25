@@ -72,6 +72,7 @@ Command-line equivalents: `pe new`, `pe import [--copy-to DIR --template "%Y/%Y-
 | `crates/raw` (`pe-raw`) | Raw decoding into a decoder-independent `RawFrame` |
 | `crates/colour` (`pe-colour`) | Matrix maths, primaries, transfer functions, output colour spaces, ICC profile writer |
 | `crates/pipeline` (`pe-pipeline`) | CPU reference render pipeline (demosaic and later stages) |
+| `crates/gpu` (`pe-gpu`) | GPU (wgpu/Metal) version of the develop pipeline, tested against the CPU reference |
 | `crates/develop` (`pe-develop`) | Editing model: slider schema, groups, settings digest, history labels |
 | `crates/catalog` (`pe-catalog`) | Photo library: SQLite catalog, import, queries, ratings/flags/labels, develop history/snapshots/presets |
 | `crates/preview` (`pe-preview`) | Thumbnails and quick previews; rendered preview cache comes in M4 |

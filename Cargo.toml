@@ -17,6 +17,7 @@ pe-pipeline = { path = "crates/pipeline" }
 pe-colour = { path = "crates/colour" }
 pe-preview = { path = "crates/preview" }
 pe-export = { path = "crates/export" }
+pe-gpu = { path = "crates/gpu" }
 pe-ffi = { path = "crates/ffi" }
 pe-develop = { path = "crates/develop" }
 rawler = "0.8"
@@ -33,6 +34,9 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 sha2 = "0.10"
 miniz_oxide = "0.8"
+wgpu = "30.0.2"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
 kamadak-exif = "0.6"
 
 [profile.dev.package."*"]

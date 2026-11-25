@@ -419,7 +419,6 @@ pub struct PeImage {
     as_shot: Option<(f32, f32)>,
 }
 
-/// Decode `path` and prepare a preview whose long edge is at least `long_edge` (where the file allows).
 /// Export images. `settings_json` is an ExportSettings object (missing fields take defaults).
 /// The catalog is only locked while gathering the items, so other calls proceed during rendering.
 /// Returns the export report as JSON.
@@ -510,6 +509,7 @@ pub unsafe extern "C" fn pe_catalog_delete_export_preset(h: *mut PeCatalog, id: 
     catalog(h).is_some_and(|c| c.inner.lock().unwrap().delete_export_preset(id).is_ok())
 }
 
+/// Decode `path` and prepare a preview whose long edge is at least `long_edge` (where the file allows).
 #[no_mangle]
 pub unsafe extern "C" fn pe_image_open(path: *const c_char, long_edge: u32) -> *mut PeImage {
     let Some(p) = str_in(path) else {

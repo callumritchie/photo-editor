@@ -140,6 +140,69 @@ pub fn delta_e76(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
+/// CIEDE2000 colour difference (CIE 142-2001), following Sharma, Wu & Dalal, "The CIEDE2000
+/// colour-difference formula: implementation notes, supplementary test data, and mathematical
+/// observations" (Color Res. Appl. 30, 2005). kL = kC = kH = 1.
+pub fn delta_e2000(lab1: [f32; 3], lab2: [f32; 3]) -> f32 {
+    use std::f64::consts::PI;
+    let [l1, a1, b1] = lab1.map(f64::from);
+    let [l2, a2, b2] = lab2.map(f64::from);
+    let c_bar = ((a1 * a1 + b1 * b1).sqrt() + (a2 * a2 + b2 * b2).sqrt()) / 2.0;
+    let c7 = c_bar.powi(7);
+    let g = 0.5 * (1.0 - (c7 / (c7 + 25f64.powi(7))).sqrt());
+    let (a1p, a2p) = ((1.0 + g) * a1, (1.0 + g) * a2);
+    let (c1p, c2p) = ((a1p * a1p + b1 * b1).sqrt(), (a2p * a2p + b2 * b2).sqrt());
+    let hue = |b: f64, a: f64| {
+        if a == 0.0 && b == 0.0 {
+            0.0
+        } else {
+            let h = b.atan2(a).to_degrees();
+            if h < 0.0 {
+                h + 360.0
+            } else {
+                h
+            }
+        }
+    };
+    let (h1p, h2p) = (hue(b1, a1p), hue(b2, a2p));
+    let dl = l2 - l1;
+    let dc = c2p - c1p;
+    let dh = if c1p * c2p == 0.0 {
+        0.0
+    } else if (h2p - h1p).abs() <= 180.0 {
+        h2p - h1p
+    } else if h2p - h1p > 180.0 {
+        h2p - h1p - 360.0
+    } else {
+        h2p - h1p + 360.0
+    };
+    let dhh = 2.0 * (c1p * c2p).sqrt() * (dh.to_radians() / 2.0).sin();
+    let l_bar = (l1 + l2) / 2.0;
+    let cp_bar = (c1p + c2p) / 2.0;
+    let hp_bar = if c1p * c2p == 0.0 {
+        h1p + h2p
+    } else if (h1p - h2p).abs() <= 180.0 {
+        (h1p + h2p) / 2.0
+    } else if h1p + h2p < 360.0 {
+        (h1p + h2p + 360.0) / 2.0
+    } else {
+        (h1p + h2p - 360.0) / 2.0
+    };
+    let t = 1.0 - 0.17 * (hp_bar - 30.0).to_radians().cos()
+        + 0.24 * (2.0 * hp_bar).to_radians().cos()
+        + 0.32 * (3.0 * hp_bar + 6.0).to_radians().cos()
+        - 0.20 * (4.0 * hp_bar - 63.0).to_radians().cos();
+    let d_theta = 30.0 * (-((hp_bar - 275.0) / 25.0).powi(2)).exp();
+    let cp7 = cp_bar.powi(7);
+    let rc = 2.0 * (cp7 / (cp7 + 25f64.powi(7))).sqrt();
+    let sl = 1.0 + 0.015 * (l_bar - 50.0).powi(2) / (20.0 + (l_bar - 50.0).powi(2)).sqrt();
+    let sc = 1.0 + 0.045 * cp_bar;
+    let sh = 1.0 + 0.015 * cp_bar * t;
+    let rt = -(2.0 * d_theta * PI / 180.0).sin() * rc;
+    let (x, y, z) = (dl / sl, dc / sc, dhh / sh);
+    (x * x + y * y + z * z + rt * y * z).sqrt() as f32
+}
+
 /// sRGB opto-electronic transfer function (linear -> encoded), IEC 61966-2-1.
 #[inline]
 pub fn srgb_encode(x: f32) -> f32 {
@@ -219,6 +282,30 @@ mod tests {
         let out = apply(&m, [1.0, 1.0, 1.0]);
         for v in out {
             assert!(close(v, 1.0, 1e-4), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn delta_e2000_matches_published_test_data() {
+        // Pairs 1, 7, 17, 25 and 34 from Sharma, Wu & Dalal (2005), Table 1.
+        let cases = [
+            ([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485], 2.0425),
+            ([50.0, 0.0, 0.0], [50.0, -1.0, 2.0], 2.3669),
+            ([50.0, 2.5, 0.0], [73.0, 25.0, -18.0], 27.1492),
+            (
+                [60.2574, -34.0099, 36.2677],
+                [60.4626, -34.1751, 39.4387],
+                1.2644,
+            ),
+            (
+                [2.0776, 0.0795, -1.1350],
+                [0.9033, -0.0636, -0.5514],
+                0.9082,
+            ),
+        ];
+        for (a, b, want) in cases {
+            let got = delta_e2000(a, b);
+            assert!((got - want).abs() < 1e-3, "{a:?} {b:?}: {got} vs {want}");
         }
     }
 }

@@ -35,6 +35,24 @@ pub fn luminance(px: &[f32], weights: [f32; 3]) -> f32 {
     px[0] * weights[0] + px[1] * weights[1] + px[2] * weights[2]
 }
 
+/// Guided-filter regularisation for Shadows/Highlights, in stops squared: edges above ~half a stop stay.
+pub const LOCAL_EPS: f32 = 0.25;
+
+/// Guided-filter radius (~2% of the short side) and the reduction factor it is computed at.
+pub fn local_tone_geometry(width: usize, height: usize) -> (usize, usize) {
+    let short = width.min(height);
+    let radius = (short as f32 * 0.02).round().max(4.0) as usize;
+    (radius, (short / 512).max(1))
+}
+
+/// Base-layer shifts in stops for the Shadows and Highlights sliders.
+pub fn local_tone_amounts(shadows: f32, highlights: f32) -> (f32, f32) {
+    (
+        shadows / 100.0 * LOCAL_MAX_EV,
+        highlights / 100.0 * LOCAL_MAX_EV,
+    )
+}
+
 /// Per-pixel gain (multiplier) implementing Shadows/Highlights. Returns `None` if both are zero.
 pub fn local_tone_gains(
     rgb: &[f32],
@@ -52,16 +70,10 @@ pub fn local_tone_gains(
         .map(|px| luminance(px, weights).max(1e-6).log2())
         .collect();
     let plane = Plane::new(width, height, log_y);
-    // Radius ~2% of the short side; regularisation 0.25 (stops^2) keeps edges above ~half a stop.
-    let short = width.min(height);
-    let radius = (short as f32 * 0.02).round().max(4.0) as usize;
-    let factor = (short / 512).max(1);
-    let base = fast_guided_filter(&plane, radius, 0.25, factor);
+    let (radius, factor) = local_tone_geometry(width, height);
+    let base = fast_guided_filter(&plane, radius, LOCAL_EPS, factor);
     let grey = MID_GREY.log2();
-    let (s, h) = (
-        shadows / 100.0 * LOCAL_MAX_EV,
-        highlights / 100.0 * LOCAL_MAX_EV,
-    );
+    let (s, h) = local_tone_amounts(shadows, highlights);
     Some(
         base.data
             .par_iter()
@@ -85,10 +97,10 @@ fn aces_fit(x: f32) -> f32 {
 /// Per-pixel parameters derived from the global tone sliders.
 #[derive(Debug, Clone, Copy)]
 pub struct ToneParams {
-    contrast_power: f32,
-    white_point: f32,
-    white_norm: f32,
-    black: f32,
+    pub contrast_power: f32,
+    pub white_point: f32,
+    pub white_norm: f32,
+    pub black: f32,
 }
 
 impl ToneParams {
@@ -230,6 +242,11 @@ impl CurveLut {
             .map(|i| eval(i as f32 / (Self::SIZE - 1) as f32).clamp(0.0, 1.0))
             .collect();
         Some(Self { lut })
+    }
+
+    /// The table: `SIZE` samples of the curve on [0, 1].
+    pub fn table(&self) -> &[f32] {
+        &self.lut
     }
 
     #[inline]

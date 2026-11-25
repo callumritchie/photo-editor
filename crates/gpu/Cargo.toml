@@ -1,0 +1,18 @@
+[package]
+name = "pe-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pe-raw.workspace = true
+pe-colour.workspace = true
+pe-pipeline.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
