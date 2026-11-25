@@ -1,26 +1,31 @@
 //! Render pipeline (CPU reference implementation).
 //!
-//! M0 scope: demosaic -> white balance -> camera-to-sRGB -> exposure -> output encoding.
-//! Later milestones add tone mapping, local adjustments, detail and colour stages, and a GPU twin
-//! of every stage verified against this CPU path.
+//! Stage order:
+//! 1. demosaic (camera-native, pre white balance)
+//! 2. white balance + highlight reconstruction (camera space)
+//! 3. camera -> linear Rec.2020 working space; exposure
+//! 4. local tone (shadows / highlights)
+//! 5. contrast, filmic display transform (whites), black level
+//! 6. Rec.2020 -> linear sRGB, gamut mapping, sRGB encoding
+//! 7. point curve (encoded values), orientation
+//!
+//! A GPU implementation of each stage will be verified against this path (milestone M4).
 
 pub mod demosaic;
+pub mod filter;
+pub mod orient;
+pub mod settings;
+pub mod tone;
+pub mod wb;
 
+pub use settings::{Demosaic, Settings, WhiteBalance};
+
+use pe_colour::{apply, Mat3, REC2020_LUMA, REC2020_TO_XYZ_D65, SRGB_TO_XYZ_D65};
 use pe_raw::{Layout, RawFrame};
 use rayon::prelude::*;
 
-/// Develop settings understood by the M0 pipeline.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Settings {
-    /// Exposure adjustment in stops (EV).
-    pub exposure_ev: f32,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self { exposure_ev: 0.0 }
-    }
-}
+/// Camera values at or above this fraction of saturation are treated as clipped.
+pub const CLIP_THRESHOLD: f32 = 0.985;
 
 /// Interleaved RGB image, f32 per channel.
 #[derive(Debug, Clone)]
@@ -37,34 +42,82 @@ pub enum RenderError {
     SingularMatrix,
 }
 
-/// Render a raw frame to scene-linear sRGB (values may exceed 1.0 before output clipping).
-pub fn render_linear(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
-    let cam_rgb = match &frame.layout {
-        Layout::Mosaic(cfa) => {
+/// Render to display-referred, sRGB-encoded values in [0, 1].
+pub fn render(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
+    let settings = settings.clone().clamped();
+    let scene = render_scene(frame, &settings)?;
+    let (w, h) = (scene.width, scene.height);
+    let mut data = scene.data;
+
+    if let Some(gains) = tone::local_tone_gains(
+        &data,
+        w,
+        h,
+        REC2020_LUMA,
+        settings.shadows,
+        settings.highlights,
+    ) {
+        data.par_chunks_mut(3)
+            .zip(gains.par_iter())
+            .for_each(|(px, g)| {
+                px[0] *= g;
+                px[1] *= g;
+                px[2] *= g;
+            });
+    }
+
+    let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks);
+    let to_srgb = pe_colour::space_to_space(&REC2020_TO_XYZ_D65, &SRGB_TO_XYZ_D65)
+        .ok_or(RenderError::SingularMatrix)?;
+    let srgb_luma = SRGB_TO_XYZ_D65[1];
+    let curve = tone::CurveLut::new(&settings.tone_curve);
+    data.par_chunks_mut(3).for_each(|px| {
+        let display = params.apply([px[0], px[1], px[2]], REC2020_LUMA);
+        let lin = tone::gamut_map(apply(&to_srgb, display), srgb_luma);
+        for (o, v) in px.iter_mut().zip(lin) {
+            let e = pe_colour::srgb_encode(v);
+            *o = match &curve {
+                Some(c) => c.apply(e),
+                None => e,
+            };
+        }
+    });
+
+    let (w, h, data) = if settings.apply_orientation {
+        orient::apply(frame.orientation, w, h, &data)
+    } else {
+        (w, h, data)
+    };
+    Ok(RgbImage {
+        width: w,
+        height: h,
+        data,
+    })
+}
+
+/// Stages 1-3: scene-linear Rec.2020 after white balance, highlight reconstruction and exposure.
+pub fn render_scene(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
+    let cam = match (&frame.layout, settings.demosaic) {
+        (Layout::Mosaic(cfa), Demosaic::Auto) => {
+            demosaic::high_quality(&frame.data, frame.width, frame.height, cfa)
+        }
+        (Layout::Mosaic(cfa), Demosaic::Fast) => {
             demosaic::neighbourhood_average(&frame.data, frame.width, frame.height, cfa)
         }
-        Layout::LinearRgb => frame.data.clone(),
+        (Layout::LinearRgb, _) => frame.data.clone(),
     };
-    let to_srgb =
-        pe_colour::camera_to_srgb(&frame.xyz_to_cam).ok_or(RenderError::SingularMatrix)?;
-    let gain = 2f32.powf(settings.exposure_ev);
-    let wb = frame.wb;
-    // Simple highlight handling (M0): after white balance, clip every channel at the level where the
-    // least-amplified channel saturates, so blown highlights stay neutral instead of turning magenta.
-    // M2 replaces this with proper highlight reconstruction.
-    let clip = wb[0].min(wb[1]).min(wb[2]);
+    let wb = wb::multipliers(frame, &settings.white_balance, &cam);
+    let to_work: Mat3 = pe_colour::camera_to_space(&frame.xyz_to_cam, &REC2020_TO_XYZ_D65)
+        .ok_or(RenderError::SingularMatrix)?;
+    let gain = settings.exposure.exp2();
 
-    let mut data = cam_rgb;
+    let mut data = cam;
     data.par_chunks_mut(3).for_each(|px| {
-        let c = [
-            (px[0] * wb[0]).clamp(0.0, clip),
-            (px[1] * wb[1]).clamp(0.0, clip),
-            (px[2] * wb[2]).clamp(0.0, clip),
-        ];
-        let rgb = pe_colour::apply(&to_srgb, c);
-        px[0] = rgb[0] * gain;
-        px[1] = rgb[1] * gain;
-        px[2] = rgb[2] * gain;
+        let balanced = reconstruct_highlights([px[0], px[1], px[2]], wb);
+        let work = apply(&to_work, balanced);
+        px[0] = work[0] * gain;
+        px[1] = work[1] * gain;
+        px[2] = work[2] * gain;
     });
     Ok(RgbImage {
         width: frame.width,
@@ -73,10 +126,74 @@ pub fn render_linear(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, 
     })
 }
 
-/// Encode a linear sRGB image to 16-bit sRGB code values (clipped to [0, 1]).
-pub fn encode_srgb16(img: &RgbImage) -> Vec<u16> {
+/// White-balance one camera pixel and repair clipped channels.
+///
+/// A clipped channel only tells us the true value is *at least* the clip level. After white balance,
+/// unclipped channels can exceed it, which tints blown highlights (classically magenta). We raise each
+/// clipped channel to the brightest unclipped one (or, if all are clipped, all to the brightest), so
+/// highlights trend to neutral and keep their brightness above 1.0 for the tone stage to roll off.
+#[inline]
+pub fn reconstruct_highlights(cam: [f32; 3], wb: [f32; 3]) -> [f32; 3] {
+    let clipped = [
+        cam[0] >= CLIP_THRESHOLD,
+        cam[1] >= CLIP_THRESHOLD,
+        cam[2] >= CLIP_THRESHOLD,
+    ];
+    let mut c = [
+        cam[0].max(0.0) * wb[0],
+        cam[1].max(0.0) * wb[1],
+        cam[2].max(0.0) * wb[2],
+    ];
+    if clipped.iter().any(|&k| k) {
+        let reference = (0..3)
+            .filter(|&i| !clipped[i])
+            .map(|i| c[i])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let reference = if reference.is_finite() {
+            reference
+        } else {
+            c[0].max(c[1]).max(c[2])
+        };
+        for i in 0..3 {
+            if clipped[i] {
+                c[i] = c[i].max(reference);
+            }
+        }
+    }
+    c
+}
+
+/// Quantise encoded [0, 1] values to 16-bit.
+pub fn to_u16(img: &RgbImage) -> Vec<u16> {
     img.data
         .par_iter()
-        .map(|&v| (pe_colour::srgb_encode(v.clamp(0.0, 1.0)) * 65535.0 + 0.5) as u16)
+        .map(|&v| (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blown_green_does_not_turn_magenta() {
+        // Green clipped while red/blue are not: after WB, red/blue exceed green -> magenta without repair.
+        let wb = [2.0, 1.0, 1.6];
+        let c = reconstruct_highlights([0.8, 1.0, 0.85], wb);
+        assert!(c[1] >= c[0] && c[1] >= c[2], "{c:?}");
+    }
+
+    #[test]
+    fn fully_clipped_pixel_is_neutral() {
+        let c = reconstruct_highlights([1.0, 1.0, 1.0], [2.0, 1.0, 1.6]);
+        assert_eq!(c, [2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn unclipped_pixel_is_just_white_balanced() {
+        assert_eq!(
+            reconstruct_highlights([0.25, 0.5, 0.5], [2.0, 1.0, 1.5]),
+            [0.5, 0.5, 0.75]
+        );
+    }
 }

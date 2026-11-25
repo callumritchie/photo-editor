@@ -936,6 +936,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "pe-colour",
  "pe-pipeline",
  "pe-raw",
  "serde_json",
@@ -957,6 +958,8 @@ dependencies = [
  "pe-colour",
  "pe-raw",
  "rayon",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

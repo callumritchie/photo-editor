@@ -20,31 +20,39 @@ fn render_all_samples() {
             eprintln!("skip (not downloaded): {}", path.display());
             continue;
         }
-        let frame =
-            pe_raw::decode_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let name = path.display();
+        let frame = pe_raw::decode_file(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             frame.width > 1000 && frame.height > 1000,
-            "{}: tiny image",
-            path.display()
-        );
-        let img = pe_pipeline::render_linear(&frame, &pe_pipeline::Settings::default()).unwrap();
-        assert!(
-            img.data.iter().all(|v| v.is_finite()),
-            "{}: non-finite pixels",
-            path.display()
+            "{name}: tiny image"
         );
 
-        // The mean of a normal photo, in linear light, should be neither black nor blown.
-        let mean: f64 = img
+        let settings = pe_pipeline::Settings::default();
+        let scene = pe_pipeline::render_scene(&frame, &settings).unwrap();
+        assert!(
+            scene.data.iter().all(|v| v.is_finite()),
+            "{name}: non-finite scene values"
+        );
+        let mean: f64 = scene
             .data
             .iter()
             .map(|&v| v.clamp(0.0, 1.0) as f64)
             .sum::<f64>()
-            / img.data.len() as f64;
+            / scene.data.len() as f64;
         assert!(
             (0.005..0.9).contains(&mean),
-            "{}: implausible mean {mean}",
-            path.display()
+            "{name}: implausible scene mean {mean}"
+        );
+
+        let out = pe_pipeline::render(&frame, &settings).unwrap();
+        assert!(
+            out.data.iter().all(|v| (0.0..=1.0).contains(v)),
+            "{name}: output outside [0,1]"
+        );
+        let mean_out: f64 = out.data.iter().map(|&v| v as f64).sum::<f64>() / out.data.len() as f64;
+        assert!(
+            (0.05..0.95).contains(&mean_out),
+            "{name}: implausible display mean {mean_out}"
         );
         rendered += 1;
     }
