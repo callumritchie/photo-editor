@@ -2,6 +2,7 @@
 //! (grid thumbnails).
 
 pub mod develop;
+pub mod export;
 pub mod import;
 pub mod schema;
 mod time;
@@ -13,8 +14,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 pub use develop::{DevelopCommand, DevelopState, HistoryStep, Preset, Snapshot};
+pub use export::ExportPreset;
 pub use import::{ImportMode, ImportOptions, ImportProgress, ImportReport};
 pub use pe_develop::Group;
+pub use pe_export::{ExportReport, ExportSettings};
 pub use pe_pipeline::Settings;
 
 #[derive(Debug, thiserror::Error)]

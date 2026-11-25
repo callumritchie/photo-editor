@@ -67,6 +67,40 @@ enum Cmd {
         #[arg(long)]
         command: String,
     },
+    /// Export images from a catalog (all images if no ids are given).
+    Export {
+        catalog: PathBuf,
+        ids: Vec<i64>,
+        /// Destination folder.
+        #[arg(long)]
+        to: PathBuf,
+        /// JSON export settings file (see `pe export-settings`); flags below override it.
+        #[arg(long)]
+        settings: Option<PathBuf>,
+        /// jpeg | png | tiff | original
+        #[arg(long)]
+        format: Option<String>,
+        /// JPEG quality 1-100.
+        #[arg(long)]
+        quality: Option<u8>,
+        /// 16-bit PNG/TIFF.
+        #[arg(long)]
+        sixteen_bit: bool,
+        /// srgb | p3 | adobe | prophoto
+        #[arg(long)]
+        space: Option<String>,
+        /// Resize so the long edge is this many pixels.
+        #[arg(long)]
+        long_edge: Option<u32>,
+        /// File name template, e.g. "{date}_{seq:3}".
+        #[arg(long)]
+        name: Option<String>,
+        /// Disable output sharpening.
+        #[arg(long)]
+        no_sharpen: bool,
+    },
+    /// Print the default export settings as JSON.
+    ExportSettings,
     /// Write an image's grid thumbnail (JPEG).
     Thumb {
         catalog: PathBuf,
@@ -210,6 +244,91 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&cat.develop_execute(&ids, &cmd)?)?
+            );
+            Ok(())
+        }
+        Cmd::Export {
+            catalog,
+            ids,
+            to,
+            settings,
+            format,
+            quality,
+            sixteen_bit,
+            space,
+            long_edge,
+            name,
+            no_sharpen,
+        } => {
+            use pe_export::{Format, Resize, TiffCompression};
+            let cat = pe_catalog::Catalog::open(&catalog)?;
+            let mut s: pe_export::ExportSettings = match settings {
+                Some(p) => serde_json::from_str(&std::fs::read_to_string(&p)?)?,
+                None => Default::default(),
+            };
+            s.destination = to;
+            if let Some(f) = format {
+                s.format = match f.as_str() {
+                    "jpeg" | "jpg" => Format::Jpeg {
+                        quality: quality.unwrap_or(90),
+                    },
+                    "png" => Format::Png { sixteen_bit },
+                    "tiff" | "tif" => Format::Tiff {
+                        sixteen_bit,
+                        compression: TiffCompression::Lzw,
+                    },
+                    "original" => Format::Original,
+                    other => bail!("unknown format {other}"),
+                };
+            } else if let (Some(q), Format::Jpeg { .. }) = (quality, s.format) {
+                s.format = Format::Jpeg { quality: q };
+            }
+            if let Some(sp) = space {
+                s.color_space = match sp.as_str() {
+                    "srgb" => pe_colour::ColorSpace::Srgb,
+                    "p3" => pe_colour::ColorSpace::DisplayP3,
+                    "adobe" => pe_colour::ColorSpace::AdobeRgb,
+                    "prophoto" => pe_colour::ColorSpace::ProPhoto,
+                    other => bail!("unknown colour space {other}"),
+                };
+            }
+            if let Some(px) = long_edge {
+                s.resize = Resize::LongEdge { pixels: px };
+            }
+            if let Some(n) = name {
+                s.file_naming = n;
+            }
+            if no_sharpen {
+                s.sharpen = None;
+            }
+            let ids = if ids.is_empty() {
+                cat.images(&Default::default())?
+                    .iter()
+                    .map(|i| i.id)
+                    .collect()
+            } else {
+                ids
+            };
+            let t0 = Instant::now();
+            let r = cat.export(&ids, &s, &mut |p| eprint!("\r{}/{}", p.done, p.total))?;
+            eprintln!();
+            println!(
+                "written {}, skipped {}, failed {} ({:.1?}) — {}",
+                r.written.len(),
+                r.skipped.len(),
+                r.failed.len(),
+                t0.elapsed(),
+                pe_export::describe(&s)
+            );
+            for (p, e) in &r.failed {
+                println!("  failed: {p}: {e}");
+            }
+            Ok(())
+        }
+        Cmd::ExportSettings => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&pe_export::ExportSettings::default())?
             );
             Ok(())
         }

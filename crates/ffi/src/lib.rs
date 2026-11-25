@@ -420,6 +420,96 @@ pub struct PeImage {
 }
 
 /// Decode `path` and prepare a preview whose long edge is at least `long_edge` (where the file allows).
+/// Export images. `settings_json` is an ExportSettings object (missing fields take defaults).
+/// The catalog is only locked while gathering the items, so other calls proceed during rendering.
+/// Returns the export report as JSON.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_export_json(
+    h: *mut PeCatalog,
+    ids: *const i64,
+    count: usize,
+    settings_json: *const c_char,
+    progress: Option<PeProgressFn>,
+    ctx: *mut c_void,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    if ids.is_null() && count > 0 {
+        return error_out("null ids");
+    }
+    let ids = if count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ids, count)
+    };
+    let settings: pe_export::ExportSettings = match str_in(settings_json).map(serde_json::from_str)
+    {
+        Some(Ok(s)) => s,
+        Some(Err(e)) => return error_out(e),
+        None => return error_out("missing settings"),
+    };
+    let items = match c.inner.lock().unwrap().export_items(ids) {
+        Ok(i) => i,
+        Err(e) => return error_out(e),
+    };
+    let ctx_addr = ctx as usize;
+    let mut cb = |p: &pe_export::ExportProgress| {
+        if let Some(f) = progress {
+            f(ctx_addr as *mut c_void, p.done as u64, p.total as u64);
+        }
+    };
+    json_out(&pe_export::export(&items, &settings, &mut cb))
+}
+
+/// Default export settings as JSON.
+#[no_mangle]
+pub extern "C" fn pe_export_defaults_json() -> *mut c_char {
+    json_out(&pe_export::ExportSettings::default())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_export_presets_json(h: *mut PeCatalog) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    match c.inner.lock().unwrap().export_presets() {
+        Ok(p) => json_out(&p),
+        Err(e) => error_out(e),
+    }
+}
+
+/// Save (or replace by name) an export preset.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_save_export_preset_json(
+    h: *mut PeCatalog,
+    name: *const c_char,
+    settings_json: *const c_char,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    let settings: pe_export::ExportSettings = match str_in(settings_json).map(serde_json::from_str)
+    {
+        Some(Ok(s)) => s,
+        _ => return error_out("bad settings"),
+    };
+    match c
+        .inner
+        .lock()
+        .unwrap()
+        .save_export_preset(str_in(name).unwrap_or(""), &settings)
+    {
+        Ok(p) => json_out(&p),
+        Err(e) => error_out(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_delete_export_preset(h: *mut PeCatalog, id: i64) -> bool {
+    catalog(h).is_some_and(|c| c.inner.lock().unwrap().delete_export_preset(id).is_ok())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn pe_image_open(path: *const c_char, long_edge: u32) -> *mut PeImage {
     let Some(p) = str_in(path) else {
@@ -568,6 +658,65 @@ mod tests {
             assert!(take(pe_catalog_presets_json(h)).contains("Bright"));
             let schema = take(pe_develop_schema_json());
             assert!(schema.contains("\"key\":\"exposure\"") && schema.contains("whiteBalance"));
+            pe_catalog_close(h);
+        }
+    }
+
+    #[test]
+    fn export_and_export_presets() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("p");
+        std::fs::create_dir_all(&src).unwrap();
+        image::RgbImage::from_pixel(64, 48, image::Rgb([200, 120, 40]))
+            .save(src.join("a.jpg"))
+            .unwrap();
+        unsafe {
+            let path = CString::new(t.path().join("lib.pecat").to_str().unwrap()).unwrap();
+            let h = pe_catalog_open(path.as_ptr(), true, ptr::null_mut());
+            let sources = CString::new(serde_json::to_string(&[&src]).unwrap()).unwrap();
+            take(pe_catalog_import_json(
+                h,
+                sources.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+            ));
+            let ids: Vec<serde_json::Value> =
+                serde_json::from_str(&take(pe_catalog_images_json(h, ptr::null()))).unwrap();
+            let id = ids[0]["id"].as_i64().unwrap();
+            let settings = CString::new(
+                serde_json::json!({
+                    "destination": t.path().join("out"),
+                    "format": {"type": "png", "sixteenBit": false},
+                    "resize": {"mode": "longEdge", "pixels": 32}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let r: serde_json::Value = serde_json::from_str(&take(pe_catalog_export_json(
+                h,
+                &id,
+                1,
+                settings.as_ptr(),
+                None,
+                ptr::null_mut(),
+            )))
+            .unwrap();
+            let written = r["written"][0].as_str().unwrap();
+            assert!(written.ends_with("a.png"), "{r}");
+            assert_eq!(image::open(written).unwrap().width(), 32);
+            let name = CString::new("Small PNG").unwrap();
+            let p: serde_json::Value = serde_json::from_str(&take(
+                pe_catalog_save_export_preset_json(h, name.as_ptr(), settings.as_ptr()),
+            ))
+            .unwrap();
+            assert_eq!(p["settings"]["resize"]["pixels"], 32);
+            assert!(take(pe_catalog_export_presets_json(h)).contains("Small PNG"));
+            assert!(pe_catalog_delete_export_preset(
+                h,
+                p["id"].as_i64().unwrap()
+            ));
+            assert!(take(pe_export_defaults_json()).contains("\"fileNaming\":\"{name}\""));
             pe_catalog_close(h);
         }
     }

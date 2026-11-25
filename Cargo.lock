@@ -1078,6 +1078,7 @@ version = "0.0.1"
 dependencies = [
  "image",
  "pe-develop",
+ "pe-export",
  "pe-pipeline",
  "pe-preview",
  "pe-raw",
@@ -1098,6 +1099,7 @@ dependencies = [
  "clap",
  "pe-catalog",
  "pe-colour",
+ "pe-export",
  "pe-pipeline",
  "pe-raw",
  "serde_json",
@@ -1146,6 +1148,7 @@ dependencies = [
  "image",
  "pe-catalog",
  "pe-develop",
+ "pe-export",
  "pe-pipeline",
  "pe-preview",
  "pe-raw",

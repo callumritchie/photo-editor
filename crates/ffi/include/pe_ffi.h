@@ -35,6 +35,14 @@ char *pe_catalog_presets_json(PeCatalog *h);
 char *pe_catalog_save_preset_json(PeCatalog *h, const char *name, const char *groups_json, const char *settings_json);
 bool pe_catalog_delete_preset(PeCatalog *h, int64_t id);
 
+/* Export: settings/presets are ExportSettings JSON; returns {"written":[...],"skipped":[...],"failed":[[path,err],...]} */
+char *pe_catalog_export_json(PeCatalog *h, const int64_t *ids, size_t count, const char *settings_json,
+                             PeProgressFn progress, void *ctx);
+char *pe_export_defaults_json(void);
+char *pe_catalog_export_presets_json(PeCatalog *h);
+char *pe_catalog_save_export_preset_json(PeCatalog *h, const char *name, const char *settings_json);
+bool pe_catalog_delete_export_preset(PeCatalog *h, int64_t id);
+
 /* Interactive preview: decode once, re-render quickly with new settings */
 typedef struct PeImage PeImage;
 PeImage *pe_image_open(const char *path, uint32_t long_edge);

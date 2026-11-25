@@ -10,7 +10,7 @@
 
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const V1: &str = r#"
 CREATE TABLE meta (
@@ -121,6 +121,17 @@ CREATE TABLE presets (
 );
 "#;
 
+/// v3: export presets (settings are `pe_export::ExportSettings` JSON).
+const V3: &str = r#"
+CREATE TABLE export_presets (
+    id         INTEGER PRIMARY KEY,
+    uuid       TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL UNIQUE,
+    settings   TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+"#;
+
 /// Connection-level settings applied on every open.
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -148,6 +159,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V2)?;
         tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+    }
+    if version < 3 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V3)?;
+        tx.pragma_update(None, "user_version", 3)?;
         tx.commit()?;
     }
     Ok(())

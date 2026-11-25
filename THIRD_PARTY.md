@@ -8,7 +8,9 @@
 | [clap](https://github.com/clap-rs/clap) | CLI parsing | MIT / Apache-2.0 |
 | [thiserror](https://github.com/dtolnay/thiserror), [anyhow](https://github.com/dtolnay/anyhow) | Error handling | MIT / Apache-2.0 |
 | [rusqlite](https://github.com/rusqlite/rusqlite) with bundled [SQLite](https://sqlite.org) | Catalog database | MIT; SQLite is public domain |
-| [image](https://github.com/image-rs/image) | JPEG decode/encode, resizing | MIT / Apache-2.0 |
+| [image](https://github.com/image-rs/image) | JPEG/PNG decode and encode, Lanczos resizing | MIT / Apache-2.0 |
+| [miniz_oxide](https://github.com/Frommi/miniz_oxide) | zlib compression of embedded PNG profiles | MIT / Zlib / Apache-2.0 |
+| [kamadak-exif](https://github.com/kamadak/exif-rs) | Tests only: independent EXIF reader to check our writer | BSD-2-Clause |
 | [uuid](https://github.com/uuid-rs/uuid) | Record identifiers | MIT / Apache-2.0 |
 | [tempfile](https://github.com/Stebalien/tempfile) | Tests | MIT / Apache-2.0 |
 | [serde](https://github.com/serde-rs/serde), [serde_json](https://github.com/serde-rs/json) | Settings files, fixtures manifest | MIT / Apache-2.0 |

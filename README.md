@@ -7,7 +7,7 @@ software vendor.
 
 ## Status
 
-**M0–M3 done.** There is a working Mac app (photo library, import, grid, and an editing view with live sliders, history, snapshots and presets), and the core decodes and renders raws.
+**M0–M3 and M5 done.** There is a working Mac app (photo library, import, grid, an editing view with live sliders, history, snapshots and presets, and export), and the core decodes and renders raws.
 
 **Rendering (M2).** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
 and renders them on the CPU:
@@ -54,21 +54,28 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
   selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.
   `Esc` returns to the grid.
+- **Export** (⇧⌘E) the selected photos: JPEG, PNG or TIFF (8 or 16-bit) or the original file; sRGB, Display P3, Adobe RGB
+  or ProPhoto with an embedded ICC profile; resize by long/short edge, width, height, fit, megapixels or percentage; output
+  sharpening for screen, matte or glossy paper; metadata (all, copyright only, or none); file names from tokens such as
+  `{date}_{seq:3}`. Settings can be saved as export presets. Rendering happens in the background; when it finishes,
+  *Show in Finder* reveals the files.
 
 Command-line equivalents: `pe new`, `pe import [--copy-to DIR --template "%Y/%Y-%m-%d"]`, `pe ls`, `pe folders`, `pe thumb`,
-`pe develop LIB ID --command '{"command":"set","settings":{"exposure":0.5}}'` (also `undo`, `redo`, `reset`, `applyPreset`, …).
+`pe develop LIB ID --command '{"command":"set","settings":{"exposure":0.5}}'` (also `undo`, `redo`, `reset`, `applyPreset`, …),
+`pe export LIB [IDS…] --to DIR [--format jpeg|png|tiff|original --space srgb|p3|adobe|prophoto --long-edge 2048 --name "{date}_{seq:3}"]`
+(or `--settings FILE` with JSON from `pe export-settings`).
 
 ## Layout
 
 | Crate | Purpose |
 |---|---|
 | `crates/raw` (`pe-raw`) | Raw decoding into a decoder-independent `RawFrame` |
-| `crates/colour` (`pe-colour`) | Matrix maths, primaries, transfer functions, camera → output colour |
+| `crates/colour` (`pe-colour`) | Matrix maths, primaries, transfer functions, output colour spaces, ICC profile writer |
 | `crates/pipeline` (`pe-pipeline`) | CPU reference render pipeline (demosaic and later stages) |
 | `crates/develop` (`pe-develop`) | Editing model: slider schema, groups, settings digest, history labels |
 | `crates/catalog` (`pe-catalog`) | Photo library: SQLite catalog, import, queries, ratings/flags/labels, develop history/snapshots/presets |
 | `crates/preview` (`pe-preview`) | Thumbnails and quick previews; rendered preview cache comes in M4 |
-| `crates/export` (`pe-export`) | Export (M5) |
+| `crates/export` (`pe-export`) | Export: resizing, output sharpening, JPEG/PNG/TIFF writers with ICC profiles and EXIF, file naming |
 | `crates/ffi` (`pe-ffi`) | C interface used by the Mac app |
 | `crates/cli` (`pe`) | Development command-line tool |
 | `app/` | SwiftUI Mac app (Swift package + `build.sh`) |

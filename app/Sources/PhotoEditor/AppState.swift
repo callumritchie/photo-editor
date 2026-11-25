@@ -27,6 +27,11 @@ final class AppState: ObservableObject {
     @Published var importProgress: (done: Int, total: Int)?
     @Published var lastReport: ImportReport?
 
+    @Published var showExport = false
+    @Published var exportProgress: (done: Int, total: Int)?
+    @Published var lastExport: ExportReport?
+    @Published var exportPresets: [ExportPresetItem] = []
+
     @Published var copiedSettings: DevelopSettings?
     @Published var presets: [PresetItem] = []
     /// Bumped per image when its edits change, so grid cells reload their thumbnail.
@@ -50,6 +55,8 @@ final class AppState: ObservableObject {
         let envs = ProcessInfo.processInfo.environment
         if let i = Int(envs["PE_START_INDEX"] ?? ""), images.indices.contains(i) { select(images[i].id) }
         mode = envs["PE_START_MODE"] == "loupe" ? .loupe : .grid
+        exportPresets = (try? core?.exportPresets()) ?? []
+        if envs["PE_START_EXPORT"] != nil, selection.isEmpty == false { showExport = true }
     }
 
     var focusedItem: ImageItem? { images.first { $0.id == focused } }
@@ -226,5 +233,57 @@ final class AppState: ObservableObject {
                 self.reload()
             }
         }
+    }
+
+    // MARK: export
+
+    /// Selected photos, or the focused one when nothing is selected; in grid order.
+    var exportTargets: [Int64] {
+        let chosen = selection.isEmpty ? Set([focused].compactMap { $0 }) : selection
+        return images.map(\.id).filter { chosen.contains($0) }
+    }
+
+    /// Last-used export settings, remembered per user (a convenience, not catalog data).
+    var lastExportOptions: ExportOptions {
+        get {
+            guard let s = UserDefaults.standard.string(forKey: "lastExportOptions"),
+                  let o = try? JSONDecoder().decode(ExportOptions.self, from: Data(s.utf8)) else { return ExportOptions() }
+            return o
+        }
+        set { UserDefaults.standard.set(newValue.json, forKey: "lastExportOptions") }
+    }
+
+    func runExport(ids: [Int64], options: ExportOptions) {
+        guard let core, !ids.isEmpty else { return }
+        lastExportOptions = options
+        lastExport = nil
+        exportProgress = (0, ids.count)
+        Task.detached(priority: .userInitiated) {
+            let result = Result {
+                try core.export(ids, options: options) { done, total in
+                    Task { @MainActor in self.exportProgress = (done, total) }
+                }
+            }
+            await MainActor.run {
+                self.exportProgress = nil
+                switch result {
+                case .success(let r): self.lastExport = r
+                case .failure(let e): self.errorMessage = e.localizedDescription
+                }
+            }
+        }
+    }
+
+    func saveExportPreset(name: String, options: ExportOptions) {
+        guard let core else { return }
+        do {
+            try core.saveExportPreset(name: name, options: options)
+            exportPresets = try core.exportPresets()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func deleteExportPreset(_ id: Int64) {
+        core?.deleteExportPreset(id)
+        exportPresets = (try? core?.exportPresets()) ?? []
     }
 }

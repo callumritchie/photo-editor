@@ -12,6 +12,7 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 pe-catalog.workspace = true
 pe-develop.workspace = true
+pe-export.workspace = true
 pe-pipeline.workspace = true
 pe-preview.workspace = true
 pe-raw.workspace = true

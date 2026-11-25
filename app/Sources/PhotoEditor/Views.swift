@@ -16,13 +16,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let delay = Double(env["PE_SNAPSHOT_DELAY"] ?? "") ?? 6
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 Self.snapshot(to: URL(fileURLWithPath: out))
-                NSApp.terminate(nil)
+                exit(0) // terminate() is refused while a sheet is open
             }
         }
     }
 
     static func snapshot(to url: URL) {
-        guard let view = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView,
+        let main = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.sheetParent == nil })
+        guard let view = (main?.attachedSheet ?? main)?.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: url)
@@ -45,6 +46,9 @@ struct PhotoEditorApp: App {
             CommandGroup(after: .newItem) {
                 Button("Import Photos…") { state.showImport = true }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
+                Button("Export…") { state.showExport = true }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .disabled(state.exportTargets.isEmpty)
             }
             CommandGroup(replacing: .undoRedo) {
                 Button("Undo Edit") { state.undo() }.keyboardShortcut("z", modifiers: .command)
@@ -86,13 +90,17 @@ struct ContentView: View {
                     .frame(width: 110)
                     Slider(value: $state.thumbSize, in: 100...360).frame(width: 120)
                     Button { state.showImport = true } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                    Button { state.showExport = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
+                        .disabled(state.exportTargets.isEmpty)
                 }
             }
         }
         .onChange(of: state.sidebar) { state.reload() }
         .onChange(of: state.minRating) { state.reload() }
         .sheet(isPresented: $state.showImport) { ImportSheet() }
+        .sheet(isPresented: $state.showExport) { ExportSheet() }
         .overlay(alignment: .bottom) { StatusBar() }
+        .overlay(alignment: .bottomTrailing) { ExportStatus() }
         .alert("Error", isPresented: .constant(state.errorMessage != nil)) {
             Button("OK") { state.errorMessage = nil }
         } message: { Text(state.errorMessage ?? "") }
