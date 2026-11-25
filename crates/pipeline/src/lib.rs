@@ -18,7 +18,7 @@ pub mod settings;
 pub mod tone;
 pub mod wb;
 
-pub use settings::{Demosaic, Settings, WhiteBalance};
+pub use settings::{Demosaic, Settings, WhiteBalance, PROCESS_VERSION};
 
 use pe_colour::{apply, Mat3, REC2020_LUMA, REC2020_TO_XYZ_D65, SRGB_TO_XYZ_D65};
 use pe_raw::{Layout, RawFrame};

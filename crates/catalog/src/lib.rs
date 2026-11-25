@@ -1,6 +1,7 @@
 //! Photo catalog: a folder `Name.pecat/` holding `catalog.sqlite` (records) and `thumbs.sqlite`
 //! (grid thumbnails).
 
+pub mod develop;
 pub mod import;
 pub mod schema;
 mod time;
@@ -11,7 +12,10 @@ use pe_preview::ThumbStore;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
+pub use develop::{DevelopCommand, DevelopState, HistoryStep, Preset, Snapshot};
 pub use import::{ImportMode, ImportOptions, ImportProgress, ImportReport};
+pub use pe_develop::Group;
+pub use pe_pipeline::Settings;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -296,15 +300,34 @@ impl Catalog {
 
     /// Grid thumbnail JPEG, generated and stored on first request if missing.
     pub fn thumbnail(&self, id: i64) -> Result<Option<Vec<u8>>> {
-        if let Some(j) = self.thumbs.get(id)? {
-            return Ok(Some(j));
+        // Unedited photos show the camera preview; edited ones a render with their settings.
+        let settings = self.develop_settings(id)?;
+        let d = pe_develop::digest(&settings);
+        let wanted = if d == pe_develop::digest(&Settings::default()) {
+            pe_preview::EMBEDDED.to_string()
+        } else {
+            d
+        };
+        if let Some((jpeg, have)) = self.thumbs.get_with_digest(id)? {
+            if have == wanted {
+                return Ok(Some(jpeg));
+            }
         }
         let Some(img) = self.image(id)? else {
             return Ok(None);
         };
-        match pe_preview::make_thumbnail(Path::new(&img.path), img.orientation) {
+        let path = Path::new(&img.path);
+        let made = if wanted == pe_preview::EMBEDDED {
+            pe_preview::make_thumbnail(path, img.orientation)
+        } else {
+            // Rendered with the edits; formats the pipeline cannot render (e.g. JPEG, for now) fall back
+            // to the plain image.
+            pe_preview::make_rendered_thumbnail(path, &settings)
+                .or_else(|_| pe_preview::make_thumbnail(path, img.orientation))
+        };
+        match made {
             Ok((w, h, jpeg)) => {
-                self.thumbs.put(id, w, h, &jpeg)?;
+                self.thumbs.put(id, w, h, &jpeg, &wanted)?;
                 Ok(Some(jpeg))
             }
             Err(_) => Ok(None),

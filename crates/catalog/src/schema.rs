@@ -10,7 +10,7 @@
 
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const V1: &str = r#"
 CREATE TABLE meta (
@@ -80,6 +80,47 @@ CREATE TABLE import_images (
 );
 "#;
 
+/// v2: non-destructive editing. Settings are canonical JSON (see `pe_develop::canonical_json`).
+const V2: &str = r#"
+CREATE TABLE develop (
+    image_id     INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+    settings     TEXT NOT NULL,
+    digest       TEXT NOT NULL,
+    current_step INTEGER,                -- history.id the current settings came from (NULL = none)
+    updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE history (
+    id         INTEGER PRIMARY KEY,
+    image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    label      TEXT NOT NULL,
+    settings   TEXT NOT NULL,
+    digest     TEXT NOT NULL
+);
+CREATE INDEX history_image ON history (image_id, id);
+
+CREATE TABLE snapshots (
+    id         INTEGER PRIMARY KEY,
+    uuid       TEXT NOT NULL UNIQUE,
+    image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    settings   TEXT NOT NULL,
+    digest     TEXT NOT NULL
+);
+CREATE INDEX snapshots_image ON snapshots (image_id);
+
+CREATE TABLE presets (
+    id         INTEGER PRIMARY KEY,
+    uuid       TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL UNIQUE,
+    groups     TEXT NOT NULL,            -- JSON array of group names
+    settings   TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+"#;
+
 /// Connection-level settings applied on every open.
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -101,6 +142,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
             [concat!("photo-editor ", env!("CARGO_PKG_VERSION"))],
         )?;
         tx.pragma_update(None, "user_version", 1)?;
+        tx.commit()?;
+    }
+    if version < 2 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V2)?;
+        tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
     }
     Ok(())

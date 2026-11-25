@@ -421,7 +421,9 @@ impl Catalog {
                     .collect();
                 for (id, t) in thumbs {
                     match t {
-                        Ok((w, h, jpeg)) => self.thumbs().put(id, w, h, &jpeg)?,
+                        Ok((w, h, jpeg)) => {
+                            self.thumbs().put(id, w, h, &jpeg, pe_preview::EMBEDDED)?
+                        }
                         Err(_) => report.thumbnails_failed += 1,
                     }
                 }

@@ -30,10 +30,16 @@ pub enum Demosaic {
     Fast,
 }
 
+/// Current rendering algorithm generation.
+pub const PROCESS_VERSION: u32 = 1;
+
 /// All settings, with defaults that produce a neutral, pleasing render.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    /// Rendering algorithm generation these settings were made with. Lets future algorithm changes keep
+    /// existing edits looking the same. Current: [`PROCESS_VERSION`].
+    pub process_version: u32,
     pub white_balance: WhiteBalance,
     /// Exposure in stops (EV), applied in scene-linear light. Range -5..5.
     pub exposure: f32,
@@ -57,6 +63,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            process_version: PROCESS_VERSION,
             white_balance: WhiteBalance::AsShot,
             exposure: 0.0,
             contrast: 0.0,

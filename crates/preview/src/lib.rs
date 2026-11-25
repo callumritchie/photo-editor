@@ -10,6 +10,9 @@ use image::{imageops::FilterType, RgbImage};
 use pe_raw::meta::{self, FileKind, Rgb8};
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// Digest marking a thumbnail made from the camera's embedded preview (an unedited photo).
+pub const EMBEDDED: &str = "embedded";
+
 /// Long edge of grid thumbnails, in pixels.
 pub const THUMB_LONG_EDGE: u32 = 512;
 
@@ -111,6 +114,21 @@ pub fn make_thumbnail(path: &Path, orientation: u8) -> Result<(u32, u32, Vec<u8>
     Ok((t.width(), t.height(), encode_jpeg(&t, 82)?))
 }
 
+/// Grid thumbnail JPEG rendered with develop settings (for edited photos).
+pub fn make_rendered_thumbnail(
+    path: &Path,
+    settings: &pe_pipeline::Settings,
+) -> Result<(u32, u32, Vec<u8>), PreviewError> {
+    let frame = pe_raw::decode_file(path)?;
+    let out = pe_pipeline::render_draft(&frame, settings)
+        .map_err(|e| PreviewError::Render(e.to_string()))?;
+    let data = out.data.iter().map(|v| (v * 255.0 + 0.5) as u8).collect();
+    let img = RgbImage::from_raw(out.width as u32, out.height as u32, data)
+        .ok_or(PreviewError::NoPreview)?;
+    let t = fit(&img, THUMB_LONG_EDGE);
+    Ok((t.width(), t.height(), encode_jpeg(&t, 82)?))
+}
+
 /// SQLite store of thumbnails keyed by image id.
 pub struct ThumbStore {
     conn: Connection,
@@ -126,24 +144,54 @@ impl ThumbStore {
                  image_id INTEGER PRIMARY KEY,
                  width INTEGER NOT NULL,
                  height INTEGER NOT NULL,
-                 jpeg BLOB NOT NULL
+                 jpeg BLOB NOT NULL,
+                 digest TEXT NOT NULL DEFAULT 'embedded'
              );",
         )?;
+        // Stores created before the digest column existed.
+        let has_digest: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('thumbs') WHERE name = 'digest')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_digest {
+            conn.execute_batch(
+                "ALTER TABLE thumbs ADD COLUMN digest TEXT NOT NULL DEFAULT 'embedded'",
+            )?;
+        }
         Ok(Self { conn })
     }
 
+    /// Store a thumbnail. `digest` identifies what it shows: [`EMBEDDED`] for the camera preview,
+    /// otherwise the digest of the develop settings it was rendered with.
     pub fn put(
         &self,
         image_id: i64,
         width: u32,
         height: u32,
         jpeg: &[u8],
+        digest: &str,
     ) -> Result<(), PreviewError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO thumbs (image_id, width, height, jpeg) VALUES (?1, ?2, ?3, ?4)",
-            params![image_id, width, height, jpeg],
+            "INSERT OR REPLACE INTO thumbs (image_id, width, height, jpeg, digest) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![image_id, width, height, jpeg, digest],
         )?;
         Ok(())
+    }
+
+    /// Thumbnail and the digest it was made for.
+    pub fn get_with_digest(
+        &self,
+        image_id: i64,
+    ) -> Result<Option<(Vec<u8>, String)>, PreviewError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT jpeg, digest FROM thumbs WHERE image_id = ?1",
+                [image_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     pub fn get(&self, image_id: i64) -> Result<Option<Vec<u8>>, PreviewError> {
@@ -194,7 +242,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = ThumbStore::open(&dir.path().join("t.sqlite")).unwrap();
         assert!(s.get(1).unwrap().is_none());
-        s.put(1, 2, 3, b"abc").unwrap();
+        s.put(1, 2, 3, b"abc", EMBEDDED).unwrap();
         assert_eq!(s.get(1).unwrap().as_deref(), Some(&b"abc"[..]));
         assert!(s.has(1).unwrap());
         s.remove(1).unwrap();
