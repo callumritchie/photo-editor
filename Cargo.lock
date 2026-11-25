@@ -1072,6 +1072,9 @@ dependencies = [
 [[package]]
 name = "pe-colour"
 version = "0.0.1"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "pe-develop"

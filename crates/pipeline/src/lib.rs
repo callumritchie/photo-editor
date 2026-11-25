@@ -20,7 +20,8 @@ pub mod wb;
 
 pub use settings::{Demosaic, Settings, WhiteBalance, PROCESS_VERSION};
 
-use pe_colour::{apply, Mat3, REC2020_LUMA, REC2020_TO_XYZ_D65, SRGB_TO_XYZ_D65};
+pub use pe_colour::ColorSpace;
+use pe_colour::{apply, Mat3, REC2020_LUMA, REC2020_TO_XYZ_D65};
 use pe_raw::{Layout, RawFrame};
 use rayon::prelude::*;
 
@@ -126,6 +127,15 @@ fn superpixel(frame: &RawFrame, cfa: &pe_raw::Cfa) -> RawFrame {
 
 /// Render to display-referred, sRGB-encoded values in [0, 1].
 pub fn render(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
+    Ok(encode_output(
+        &render_display(frame, settings)?,
+        ColorSpace::Srgb,
+    ))
+}
+
+/// Stages 1-5 and orientation: display-referred *linear* Rec.2020 (values may lie outside [0, 1] gamut
+/// in other spaces), with the point curve applied. Resizing and sharpening for export happen on this.
+pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
     let settings = settings.clone().clamped();
     let scene = render_scene(frame, &settings)?;
     let (w, h) = (scene.width, scene.height);
@@ -149,20 +159,16 @@ pub fn render(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderE
     }
 
     let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks);
-    let to_srgb = pe_colour::space_to_space(&REC2020_TO_XYZ_D65, &SRGB_TO_XYZ_D65)
-        .ok_or(RenderError::SingularMatrix)?;
-    let srgb_luma = SRGB_TO_XYZ_D65[1];
+    // The point curve is defined on sRGB-encoded display values, independent of the output space.
     let curve = tone::CurveLut::new(&settings.tone_curve);
     data.par_chunks_mut(3).for_each(|px| {
-        let display = params.apply([px[0], px[1], px[2]], REC2020_LUMA);
-        let lin = tone::gamut_map(apply(&to_srgb, display), srgb_luma);
-        for (o, v) in px.iter_mut().zip(lin) {
-            let e = pe_colour::srgb_encode(v);
-            *o = match &curve {
-                Some(c) => c.apply(e),
-                None => e,
-            };
+        let mut d = params.apply([px[0], px[1], px[2]], REC2020_LUMA);
+        if let Some(c) = &curve {
+            for v in &mut d {
+                *v = pe_colour::srgb_decode(c.apply(pe_colour::srgb_encode(v.clamp(0.0, 1.0))));
+            }
         }
+        px.copy_from_slice(&d);
     });
 
     let (w, h, data) = if settings.apply_orientation {
@@ -175,6 +181,25 @@ pub fn render(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderE
         height: h,
         data,
     })
+}
+
+/// Convert display-linear Rec.2020 to encoded values in [0, 1] for `space`, bringing out-of-gamut colours
+/// in by desaturating towards luminance.
+pub fn encode_output(img: &RgbImage, space: ColorSpace) -> RgbImage {
+    let m = space.from_space(&REC2020_TO_XYZ_D65);
+    let luma = space.luma();
+    let mut data = img.data.clone();
+    data.par_chunks_mut(3).for_each(|px| {
+        let lin = tone::gamut_map(apply(&m, [px[0], px[1], px[2]]), luma);
+        for (o, v) in px.iter_mut().zip(lin) {
+            *o = space.encode(v);
+        }
+    });
+    RgbImage {
+        width: img.width,
+        height: img.height,
+        data,
+    }
 }
 
 /// Stages 1-3: scene-linear Rec.2020 after white balance, highlight reconstruction and exposure.

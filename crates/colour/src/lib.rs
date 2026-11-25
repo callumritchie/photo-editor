@@ -2,6 +2,10 @@
 //! camera-to-working-space transforms, CIELAB, and correlated colour temperature.
 
 pub mod cct;
+pub mod icc;
+pub mod space;
+
+pub use space::ColorSpace;
 
 /// Row-major 3x3 matrix.
 pub type Mat3 = [[f32; 3]; 3];
