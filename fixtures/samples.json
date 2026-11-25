@@ -1,0 +1,113 @@
+{
+  "note": "Sample raw files from raw.pixls.us, each dedicated to the public domain under CC0 1.0. Downloaded by scripts/fetch-samples.sh, verified by SHA-256, never committed.",
+  "samples": [
+    {
+      "id": "canon-eos-5d-mark-iii",
+      "make": "Canon",
+      "model": "EOS 5D Mark III",
+      "mode": "",
+      "file": "Canon-EOS_5D_Mark_III.cr2",
+      "url": "https://raw.pixls.us/getfile.php/771/nice/Canon%20-%20EOS%205D%20Mark%20III.CR2",
+      "sha256": "ec069b178b9383d80c72f8cdc1b79bd54ca451e7c20793b109d8ad73bef6bdf6",
+      "size_mb": 24.76,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "canon-eos-r6",
+      "make": "Canon",
+      "model": "EOS R6",
+      "mode": "3:2",
+      "file": "Canon-EOS_R6.cr3",
+      "url": "https://raw.pixls.us/getfile.php/4662/nice/Canon%20-%20EOS%20R6%20-%203:2.CR3",
+      "sha256": "81fab349ae9080fd0172583b7fd5ea36806e95ffa434909d2ccc6527dde34ee6",
+      "size_mb": 21.84,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "nikon-d750",
+      "make": "Nikon",
+      "model": "D750",
+      "mode": "12bit 12bit compressed (Lossy (type 2)) (3:2)",
+      "file": "Nikon-D750.nef",
+      "url": "https://raw.pixls.us/getfile.php/895/nice/Nikon%20-%20D750%20-%2012bit%2012bit%20compressed%20(Lossy%20(type%202))%20(3:2).NEF",
+      "sha256": "e4a3f85e014275fc0a47600a373af95ec850872a5f6cf87649bcaa42b77ef2e4",
+      "size_mb": 17.2,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "sony-ilce-7m3",
+      "make": "Sony",
+      "model": "ILCE-7M3",
+      "mode": "12bit 12bit compressed (3:2)",
+      "file": "Sony-ILCE-7M3.arw",
+      "url": "https://raw.pixls.us/getfile.php/2415/nice/Sony%20-%20ILCE-7M3%20-%2012bit%2012bit%20compressed%20(3:2).ARW",
+      "sha256": "3ae2ff75cfa7240d0b4458f662afd28665c5fd1e83d230ac73f5ad69d3df8592",
+      "size_mb": 24.44,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "fujifilm-x-t3",
+      "make": "Fujifilm",
+      "model": "X-T3",
+      "mode": "14bit 14bit compressed (3:2)",
+      "file": "Fujifilm-X-T3.raf",
+      "url": "https://raw.pixls.us/getfile.php/2783/nice/Fujifilm%20-%20X-T3%20-%2014bit%2014bit%20compressed%20(3:2).RAF",
+      "sha256": "95b33021160b239ceb1a09d46a1b29cb60cb7dd47581feb126b337c219091754",
+      "size_mb": 26.05,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "panasonic-dc-g9",
+      "make": "Panasonic",
+      "model": "DC-G9",
+      "mode": "4:3",
+      "file": "Panasonic-DC-G9.rw2",
+      "url": "https://raw.pixls.us/getfile.php/2348/nice/Panasonic%20-%20DC-G9%20-%204:3.RW2",
+      "sha256": "16282357ce0143ff7d36737f82074662db7aa0790ecd309196f406baf0f586a7",
+      "size_mb": 23.13,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "olympus-e-m1markii",
+      "make": "Olympus",
+      "model": "E-M1MarkII",
+      "mode": "16bit (4:3)",
+      "file": "Olympus-E-M1MarkII.orf",
+      "url": "https://raw.pixls.us/getfile.php/1993/nice/Olympus%20-%20E-M1MarkII%20-%2016bit%20(4:3).ORF",
+      "sha256": "0b433019e5fa61548d7eb0eb7bb90894251542c056da72355202382696d0ceb8",
+      "size_mb": 16.46,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "pentax-k-1",
+      "make": "Pentax",
+      "model": "K-1",
+      "mode": "14bit (3:2)",
+      "file": "Pentax-K-1.pef",
+      "url": "https://raw.pixls.us/getfile.php/2469/nice/Pentax%20-%20K-1%20-%2014bit%20(3:2).PEF",
+      "sha256": "068c902e7b38ac31c7c6eca5c55f69ca395ec6aa7170489281b692a893d0fee9",
+      "size_mb": 44.72,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "pentax-k-1-dng",
+      "make": "Pentax",
+      "model": "K-1",
+      "mode": "14bit (3:2)",
+      "file": "Pentax-K-1.dng",
+      "url": "https://raw.pixls.us/getfile.php/2470/nice/Pentax%20-%20K-1%20-%2014bit%20(3:2).DNG",
+      "sha256": "350ad3378e5ed048292640cc3bc3893d5bf4be3d186042161b4384fb1f1aa577",
+      "size_mb": 44.92,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    }
+  ]
+}

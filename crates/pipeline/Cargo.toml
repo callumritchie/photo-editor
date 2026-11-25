@@ -1,0 +1,13 @@
+[package]
+name = "pe-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pe-raw.workspace = true
+pe-colour.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
