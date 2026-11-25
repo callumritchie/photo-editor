@@ -8,16 +8,99 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
-use pe_catalog::{Catalog, Flag, ImportOptions, Query};
+use pe_catalog::{Catalog, Flag, ImportOptions, Query, RenderStores};
 use serde::Serialize;
 
 pub struct PeCatalog {
-    inner: Mutex<Catalog>,
+    inner: Arc<Mutex<Catalog>>,
+    renders: Arc<RenderQueue>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for PeCatalog {
+    fn drop(&mut self) {
+        self.renders.stop.store(true, Ordering::SeqCst);
+        self.renders.wake.notify_all();
+        if let Some(w) = self.worker.take() {
+            let _ = w.join(); // waits for at most the render in progress
+        }
+    }
+}
+
+/// Called on the render worker's thread after a photo's previews were rendered:
+/// `(ctx, image_id, thumbnail_changed)`.
+pub type PeRenderedFn = extern "C" fn(*mut c_void, i64, bool);
+
+/// Pending background renders (loupe previews and edited thumbnails), most urgent first.
+#[derive(Default)]
+struct RenderQueue {
+    queue: Mutex<VecDeque<i64>>,
+    wake: Condvar,
+    stop: AtomicBool,
+    callback: Mutex<Option<(PeRenderedFn, usize)>>,
+}
+
+impl RenderQueue {
+    fn request(&self, ids: &[i64], urgent: bool) {
+        let mut q = self.queue.lock().unwrap();
+        q.retain(|id| !ids.contains(id));
+        if urgent {
+            for &id in ids.iter().rev() {
+                q.push_front(id);
+            }
+        } else {
+            q.extend(ids);
+        }
+        drop(q);
+        self.wake.notify_one();
+    }
+}
+
+fn render_worker(cat: Arc<Mutex<Catalog>>, q: Arc<RenderQueue>, dir: PathBuf) {
+    let Ok(mut stores) = RenderStores::open(&dir) else {
+        return;
+    };
+    // Photos that failed to render, by the digest that failed, so they are not retried in a loop.
+    let mut failed: HashMap<i64, String> = HashMap::new();
+    loop {
+        let id = {
+            let mut g = q.queue.lock().unwrap();
+            loop {
+                if q.stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(id) = g.pop_front() {
+                    break id;
+                }
+                g = q.wake.wait(g).unwrap();
+            }
+        };
+        let job = match cat.lock().unwrap().render_job(id) {
+            Ok(Some(j)) => j,
+            _ => continue,
+        };
+        if failed.get(&id) == Some(&job.digest) || stores.is_fresh(&job).unwrap_or(false) {
+            continue;
+        }
+        match stores.run(&job, gpu()) {
+            Ok(thumb_changed) => {
+                if let Some((f, ctx)) = *q.callback.lock().unwrap() {
+                    f(ctx as *mut c_void, id, thumb_changed);
+                }
+            }
+            Err(_) => {
+                failed.insert(id, job.digest);
+            }
+        }
+    }
 }
 
 fn json_out<T: Serialize>(v: &T) -> *mut c_char {
@@ -72,9 +155,23 @@ pub unsafe extern "C" fn pe_catalog_open(
         cat.map_err(|e| e.to_string())
     })();
     match res {
-        Ok(c) => Box::into_raw(Box::new(PeCatalog {
-            inner: Mutex::new(c),
-        })),
+        Ok(c) => {
+            let dir = c.dir().to_path_buf();
+            let inner = Arc::new(Mutex::new(c));
+            let renders = Arc::new(RenderQueue::default());
+            let worker = std::thread::Builder::new()
+                .name("pe-render".into())
+                .spawn({
+                    let (cat, q) = (inner.clone(), renders.clone());
+                    move || render_worker(cat, q, dir)
+                })
+                .ok();
+            Box::into_raw(Box::new(PeCatalog {
+                inner,
+                renders,
+                worker,
+            }))
+        }
         Err(e) => {
             if !err_out.is_null() {
                 *err_out = CString::new(e)
@@ -230,9 +327,78 @@ pub unsafe extern "C" fn pe_catalog_thumbnail(
     let Some(c) = catalog(h) else {
         return ptr::null_mut();
     };
-    match c.inner.lock().unwrap().thumbnail(id) {
-        Ok(Some(j)) => bytes_out(j, out_len),
-        _ => ptr::null_mut(),
+    // Never renders here: stale or placeholder thumbnails come back at once and a background render is
+    // queued; the render callback reports when the real one is ready.
+    let quick = c.inner.lock().unwrap().thumbnail_quick(id);
+    match quick {
+        Ok((jpeg, needs_render)) => {
+            if needs_render {
+                c.renders.request(&[id], true);
+            }
+            jpeg.map_or(ptr::null_mut(), |j| bytes_out(j, out_len))
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Cached loupe preview JPEG (free with `pe_bytes_free`), or NULL. `out_fresh` reports whether it
+/// shows the current settings; when missing or stale and `queue_if_stale`, a background render is
+/// queued (pass false for a photo that is about to be rendered live anyway).
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_preview(
+    h: *mut PeCatalog,
+    id: i64,
+    queue_if_stale: bool,
+    out_len: *mut usize,
+    out_fresh: *mut bool,
+) -> *mut u8 {
+    let Some(c) = catalog(h) else {
+        return ptr::null_mut();
+    };
+    let cached = c.inner.lock().unwrap().preview(id).ok().flatten();
+    let fresh = cached.as_ref().is_some_and(|p| p.1);
+    if !fresh && queue_if_stale {
+        c.renders.request(&[id], true);
+    }
+    if !out_fresh.is_null() {
+        *out_fresh = fresh;
+    }
+    cached.map_or(ptr::null_mut(), |(j, _)| bytes_out(j, out_len))
+}
+
+/// Queue background renders of previews (and edited thumbnails). `urgent` puts them first, e.g. the
+/// photos next to the one being viewed; otherwise they go to the back (e.g. "build previews").
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_request_renders(
+    h: *mut PeCatalog,
+    ids: *const i64,
+    count: usize,
+    urgent: bool,
+) {
+    let Some(c) = catalog(h) else { return };
+    if ids.is_null() || count == 0 {
+        return;
+    }
+    c.renders
+        .request(std::slice::from_raw_parts(ids, count), urgent);
+}
+
+/// Number of background renders waiting.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_pending_renders(h: *mut PeCatalog) -> usize {
+    catalog(h).map_or(0, |c| c.renders.queue.lock().unwrap().len())
+}
+
+/// Register (or clear, with NULL) the callback run after each background render. It runs on a worker
+/// thread; `ctx` must stay valid until it is cleared or the catalog is closed.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_set_render_callback(
+    h: *mut PeCatalog,
+    callback: Option<PeRenderedFn>,
+    ctx: *mut c_void,
+) {
+    if let Some(c) = catalog(h) {
+        *c.renders.callback.lock().unwrap() = callback.map(|f| (f, ctx as usize));
     }
 }
 
@@ -695,6 +861,62 @@ mod tests {
             let schema = take(pe_develop_schema_json());
             assert!(schema.contains("\"key\":\"exposure\"") && schema.contains("whiteBalance"));
             pe_catalog_close(h);
+        }
+    }
+
+    static RENDERED: Mutex<Vec<(i64, bool)>> = Mutex::new(Vec::new());
+    extern "C" fn on_rendered(_ctx: *mut c_void, id: i64, thumb_changed: bool) {
+        RENDERED.lock().unwrap().push((id, thumb_changed));
+    }
+
+    #[test]
+    fn background_worker_renders_previews() {
+        let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/raw/Nikon-D750.nef");
+        if !raw.exists() {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("p");
+        std::fs::create_dir_all(&src).unwrap();
+        for n in ["a.nef", "b.nef", "c.nef"] {
+            std::fs::copy(&raw, src.join(n)).unwrap();
+        }
+        unsafe {
+            let path = CString::new(t.path().join("lib.pecat").to_str().unwrap()).unwrap();
+            let h = pe_catalog_open(path.as_ptr(), true, ptr::null_mut());
+            let sources = CString::new(serde_json::to_string(&[&src]).unwrap()).unwrap();
+            take(pe_catalog_import_json(
+                h,
+                sources.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+            ));
+            let imgs: Vec<serde_json::Value> =
+                serde_json::from_str(&take(pe_catalog_images_json(h, ptr::null()))).unwrap();
+            let ids: Vec<i64> = imgs.iter().map(|i| i["id"].as_i64().unwrap()).collect();
+            pe_catalog_set_render_callback(h, Some(on_rendered), ptr::null_mut());
+
+            // No preview yet: NULL now, rendered in the background.
+            let (mut len, mut fresh) = (0usize, true);
+            assert!(pe_catalog_preview(h, ids[0], true, &mut len, &mut fresh).is_null());
+            assert!(!fresh);
+            let t0 = std::time::Instant::now();
+            while !RENDERED.lock().unwrap().iter().any(|r| r.0 == ids[0]) {
+                assert!(t0.elapsed().as_secs() < 30, "render did not finish");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let p = pe_catalog_preview(h, ids[0], true, &mut len, &mut fresh);
+            assert!(!p.is_null() && fresh && len > 10_000);
+            pe_bytes_free(p, len);
+
+            // Closing with work still queued stops promptly.
+            pe_catalog_request_renders(h, ids[1..].as_ptr(), 2, false);
+            assert!(pe_catalog_pending_renders(h) <= 2);
+            let t0 = std::time::Instant::now();
+            pe_catalog_close(h);
+            assert!(t0.elapsed().as_secs() < 10);
         }
     }
 

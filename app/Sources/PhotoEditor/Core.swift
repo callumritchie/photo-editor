@@ -73,6 +73,11 @@ enum CoreError: LocalizedError {
 
 private struct ErrorBox: Decodable { let error: String }
 
+private final class RenderCallbackBox {
+    let handler: (Int64, Bool) -> Void
+    init(_ handler: @escaping (Int64, Bool) -> Void) { self.handler = handler }
+}
+
 private final class ProgressBox {
     let callback: (Int, Int) -> Void
     init(_ callback: @escaping (Int, Int) -> Void) { self.callback = callback }
@@ -92,7 +97,40 @@ final class Core: @unchecked Sendable {
         handle = h
     }
 
-    deinit { pe_catalog_close(handle) }
+    private var renderCallback: Unmanaged<RenderCallbackBox>?
+
+    deinit {
+        pe_catalog_close(handle) // joins the render worker, so the callback box is no longer used
+        renderCallback?.release()
+    }
+
+    /// Run `handler(imageId, thumbnailChanged)` (on a background thread) after each background render.
+    func onRendered(_ handler: @escaping (Int64, Bool) -> Void) {
+        let box = Unmanaged.passRetained(RenderCallbackBox(handler))
+        pe_catalog_set_render_callback(handle, { ctx, id, thumbChanged in
+            guard let ctx else { return }
+            Unmanaged<RenderCallbackBox>.fromOpaque(ctx).takeUnretainedValue().handler(id, thumbChanged)
+        }, box.toOpaque())
+        renderCallback?.release()
+        renderCallback = box
+    }
+
+    /// Cached loupe preview and whether it shows the current settings. With `queueIfStale`, a missing
+    /// or stale preview is queued for a background render.
+    func preview(_ id: Int64, queueIfStale: Bool) -> (image: NSImage, fresh: Bool)? {
+        var len = 0
+        var fresh = false
+        guard let p = pe_catalog_preview(handle, id, queueIfStale, &len, &fresh) else { return nil }
+        defer { pe_bytes_free(p, len) }
+        guard let img = NSImage(data: Data(bytes: p, count: len)) else { return nil }
+        return (img, fresh)
+    }
+
+    func requestRenders(_ ids: [Int64], urgent: Bool) {
+        ids.withUnsafeBufferPointer { pe_catalog_request_renders(handle, $0.baseAddress, ids.count, urgent) }
+    }
+
+    var pendingRenders: Int { pe_catalog_pending_renders(handle) }
 
     private func decode<T: Decodable>(_ p: UnsafeMutablePointer<CChar>?) throws -> T {
         guard let p else { throw CoreError.message("no response from core") }

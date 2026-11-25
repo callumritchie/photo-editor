@@ -7,7 +7,7 @@ software vendor.
 
 ## Status
 
-**M0–M3 and M5 done.** There is a working Mac app (photo library, import, grid, an editing view with live sliders, history, snapshots and presets, and export), and the core decodes and renders raws.
+**M0–M5 done.** There is a working Mac app (photo library, import, grid, an editing view with live GPU-rendered sliders, history, snapshots and presets, cached previews, and export), and the core decodes and renders raws.
 
 **Rendering (M2).** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
 and renders them on the CPU:
@@ -49,11 +49,15 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
 - **Grid:** folders in the sidebar, rating filter, thumbnail size. Keys: `0`–`5` rating, `P` pick, `X` reject, `U` unflag,
   `6`–`9` red/yellow/green/blue label, arrows to move, `Return`/`Space` to open in the loupe.
 - **Edit (loupe):** `Return` on a photo opens it with the Develop panel: white balance (as shot / auto / custom temperature and tint),
-  exposure, contrast, highlights, shadows, whites and blacks. Sliders update a live preview while you drag (about 50–200 ms per
-  render on the CPU). Each release records one history step. ⌘Z/⇧⌘Z undo and redo; click any history step to return to it.
+  exposure, contrast, highlights, shadows, whites and blacks. Sliders update a live preview while you drag, rendered on the GPU (Metal)
+  in about 5–15 ms; without a GPU the CPU takes 25–55 ms. Each release records one history step. ⌘Z/⇧⌘Z undo and redo; click any history step to return to it.
   You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
   selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.
   `Esc` returns to the grid.
+- **Previews:** the loupe opens on a cached 2048 px preview straight away, then switches to the live render. While you view a
+  photo, the ones either side are rendered in the background; *File › Build Previews* renders the selection (or all shown).
+  Edited grid thumbnails are re-rendered in the background too. Cached previews live in `previews.sqlite` inside the library
+  (1 GB budget, least recently used dropped first); deleting that file is safe.
 - **Export** (⇧⌘E) the selected photos: JPEG, PNG or TIFF (8 or 16-bit) or the original file; sRGB, Display P3, Adobe RGB
   or ProPhoto with an embedded ICC profile; resize by long/short edge, width, height, fit, megapixels or percentage; output
   sharpening for screen, matte or glossy paper; metadata (all, copyright only, or none); file names from tokens such as

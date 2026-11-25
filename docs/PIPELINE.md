@@ -29,9 +29,17 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | `demosaic` | `auto` / `fast` | auto |
 | `applyOrientation` | bool | true |
 
+## GPU implementation
+`crates/gpu` runs stages 2–7 as WGSL compute shaders through wgpu (Metal on macOS) on a linear-RGB frame (the reduced
+preview). Each shader entry point mirrors one CPU function, including the guided filter's clamped box means and bilinear
+upsampling. `tests/parity.rs` renders four cameras under six sets of settings both ways and requires CIEDE2000 mean < 0.1
+and 99.9th percentile < 0.5, with no channel more than one 8-bit step apart. In practice every percentile is 0.000;
+the few differing pixels come from float rounding. Without a GPU (or with `PE_NO_GPU` set) everything falls back to the CPU.
+
 ## Known limitations (planned)
 - A single colour matrix per camera (the daylight-like one). Dual-illuminant interpolation is still to do.
 - No baseline-exposure offset per camera, so some cameras render darker than others at exposure 0.
 - Demosaic is a solid classical method. RCD (Bayer) and Markesteijn (X-Trans) are candidates for higher detail.
 - Highlight reconstruction is per-pixel. Spatial (inpainting-style) reconstruction would recover more colour in large blown areas.
-- CPU only, so a full render takes about 1–2 s for 24–36 MP. Interactive speed comes with the GPU pipeline (M4).
+- Demosaic runs on the CPU only, so a full-resolution render takes about 1–2.5 s for 24–36 MP. Live editing uses a reduced
+  preview, which the GPU renders in milliseconds.

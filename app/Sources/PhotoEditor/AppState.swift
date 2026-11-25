@@ -32,6 +32,10 @@ final class AppState: ObservableObject {
     @Published var lastExport: ExportReport?
     @Published var exportPresets: [ExportPresetItem] = []
 
+    /// Background renders still queued (previews and edited thumbnails).
+    @Published var pendingRenders = 0
+    private var watchingRenders = false
+
     @Published var copiedSettings: DevelopSettings?
     @Published var presets: [PresetItem] = []
     /// Bumped per image when its edits change, so grid cells reload their thumbnail.
@@ -56,6 +60,9 @@ final class AppState: ObservableObject {
         if let i = Int(envs["PE_START_INDEX"] ?? ""), images.indices.contains(i) { select(images[i].id) }
         mode = envs["PE_START_MODE"] == "loupe" ? .loupe : .grid
         exportPresets = (try? core?.exportPresets()) ?? []
+        core?.onRendered { [weak self] id, thumbChanged in
+            Task { @MainActor in self?.rendered(id, thumbChanged: thumbChanged) }
+        }
         if envs["PE_START_EXPORT"] != nil, selection.isEmpty == false { showExport = true }
     }
 
@@ -91,9 +98,55 @@ final class AppState: ObservableObject {
     func developSession() -> DevelopModel? {
         guard let core, let item = focusedItem else { return nil }
         if develop?.item.id != item.id {
+            // Refresh the cached preview of the photo we are leaving (skipped if already current).
+            if let previous = develop?.item.id { core.requestRenders([previous], urgent: false); watchRenders() }
             develop = DevelopModel(item: item, core: core) { [weak self] id in self?.editsChanged([id]) }
         }
         return develop
+    }
+
+    // MARK: background renders
+
+    private func rendered(_ id: Int64, thumbChanged: Bool) {
+        if thumbChanged { editsChanged([id]) }
+        pendingRenders = core?.pendingRenders ?? 0
+    }
+
+    /// Cached loupe preview for an instant first image (not queued: the loupe renders it live).
+    func cachedPreview(_ id: Int64) async -> NSImage? {
+        guard let core else { return nil }
+        return await Task.detached(priority: .userInitiated) { core.preview(id, queueIfStale: false)?.image }.value
+    }
+
+    /// Render the previews of the photos next to `id` ahead of time, nearest first.
+    func prefetchAround(_ id: Int64) {
+        guard let core, let i = images.firstIndex(where: { $0.id == id }) else { return }
+        let order = [1, -1, 2, 3, -2]
+        let ids = order.compactMap { images.indices.contains(i + $0) ? images[i + $0].id : nil }
+        core.requestRenders(ids, urgent: true)
+        watchRenders()
+    }
+
+    /// Build previews for the selection, or for every photo shown when nothing is selected.
+    func buildPreviews() {
+        guard let core else { return }
+        let ids = selection.isEmpty ? images.map(\.id) : images.map(\.id).filter { selection.contains($0) }
+        core.requestRenders(ids, urgent: false)
+        watchRenders()
+    }
+
+    /// Keep `pendingRenders` current while the queue drains (jobs that are already up to date finish
+    /// without a callback).
+    private func watchRenders() {
+        guard !watchingRenders else { return }
+        watchingRenders = true
+        Task { @MainActor in
+            repeat {
+                pendingRenders = core?.pendingRenders ?? 0
+                try? await Task.sleep(for: .milliseconds(500))
+            } while pendingRenders > 0
+            watchingRenders = false
+        }
     }
 
     func editsChanged(_ ids: [Int64]) {

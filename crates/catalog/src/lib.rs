@@ -1,15 +1,16 @@
-//! Photo catalog: a folder `Name.pecat/` holding `catalog.sqlite` (records) and `thumbs.sqlite`
-//! (grid thumbnails).
+//! Photo catalog: a folder `Name.pecat/` holding `catalog.sqlite` (records), `thumbs.sqlite` (grid
+//! thumbnails) and `previews.sqlite` (cached loupe previews; safe to delete).
 
 pub mod develop;
 pub mod export;
 pub mod import;
+pub mod render;
 pub mod schema;
 mod time;
 
 use std::path::{Path, PathBuf};
 
-use pe_preview::ThumbStore;
+use pe_preview::{PreviewStore, ThumbStore};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -19,6 +20,7 @@ pub use import::{ImportMode, ImportOptions, ImportProgress, ImportReport};
 pub use pe_develop::Group;
 pub use pe_export::{ExportReport, ExportSettings};
 pub use pe_pipeline::Settings;
+pub use render::{RenderJob, RenderStores};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -105,6 +107,7 @@ pub struct Catalog {
     dir: PathBuf,
     pub(crate) conn: Connection,
     thumbs: ThumbStore,
+    pub(crate) previews: PreviewStore,
 }
 
 const IMAGE_SELECT: &str = "SELECT i.id, i.uuid, f.folder_id, r.path, fo.rel_path, f.name, i.capture_time, i.rating, i.flag,
@@ -176,10 +179,12 @@ impl Catalog {
         schema::configure(&conn)?;
         schema::migrate(&mut conn)?;
         let thumbs = ThumbStore::open(&dir.join("thumbs.sqlite"))?;
+        let previews = PreviewStore::open(&dir.join("previews.sqlite"))?;
         Ok(Self {
             dir: dir.to_path_buf(),
             conn,
             thumbs,
+            previews,
         })
     }
 

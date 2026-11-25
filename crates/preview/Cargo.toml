@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 pe-raw.workspace = true
 pe-pipeline.workspace = true
+pe-gpu.workspace = true
 image.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true

@@ -23,7 +23,15 @@ bool pe_catalog_set_rating(PeCatalog *h, const int64_t *ids, size_t count, uint8
 bool pe_catalog_set_flag(PeCatalog *h, const int64_t *ids, size_t count, int8_t flag);
 bool pe_catalog_set_label(PeCatalog *h, const int64_t *ids, size_t count, const char *label);
 
+/* Grid thumbnail JPEG; never blocks on a render (stale/placeholder returned, render queued). */
 uint8_t *pe_catalog_thumbnail(PeCatalog *h, int64_t id, size_t *out_len);
+
+/* Background renders: cached 2048 px loupe previews and edited thumbnails. */
+typedef void (*PeRenderedFn)(void *ctx, int64_t image_id, bool thumbnail_changed);
+uint8_t *pe_catalog_preview(PeCatalog *h, int64_t id, bool queue_if_stale, size_t *out_len, bool *out_fresh);
+void pe_catalog_request_renders(PeCatalog *h, const int64_t *ids, size_t count, bool urgent);
+size_t pe_catalog_pending_renders(PeCatalog *h);
+void pe_catalog_set_render_callback(PeCatalog *h, PeRenderedFn callback, void *ctx);
 uint8_t *pe_quick_image(const char *path, uint8_t orientation, uint32_t long_edge, uint32_t *w, uint32_t *h);
 uint8_t *pe_render(const char *path, const char *settings_json, uint32_t long_edge, uint32_t *w, uint32_t *h);
 

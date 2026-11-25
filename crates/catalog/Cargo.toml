@@ -12,6 +12,7 @@ pe-preview.workspace = true
 pe-develop.workspace = true
 pe-export.workspace = true
 pe-pipeline.workspace = true
+pe-gpu.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
 rayon.workspace = true

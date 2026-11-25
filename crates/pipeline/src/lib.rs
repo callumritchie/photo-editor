@@ -55,41 +55,82 @@ pub fn render_draft(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, R
     }
 }
 
-/// Reduce a frame once for interactive editing: superpixel (no demosaic), then an integer box
-/// downscale so the long edge is no smaller than `long_edge`. The result is a small linear-RGB frame
+/// Reduce a frame once for interactive editing: superpixel (no demosaic), then an area-average
+/// resample so the long edge is `long_edge` (never enlarged). The result is a small linear-RGB frame
 /// that [`render`] processes quickly on every slider change.
 pub fn prepare_preview(frame: &RawFrame, long_edge: usize) -> RawFrame {
     let base = match &frame.layout {
         Layout::Mosaic(cfa) => superpixel(frame, cfa),
         Layout::LinearRgb => frame.clone(),
     };
-    let factor = (base.width.max(base.height) / long_edge.max(1)).max(1);
-    if factor == 1 {
+    let long = base.width.max(base.height);
+    if long <= long_edge.max(1) {
         return base;
     }
-    let (w, h) = (base.width / factor, base.height / factor);
-    let mut data = vec![0.0f32; w * h * 3];
-    data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
-        for x in 0..w {
-            let mut acc = [0.0f32; 3];
-            for dy in 0..factor {
-                let src = ((y * factor + dy) * base.width + x * factor) * 3;
-                for px in base.data[src..src + factor * 3].chunks(3) {
-                    acc[0] += px[0];
-                    acc[1] += px[1];
-                    acc[2] += px[2];
-                }
-            }
-            let n = (factor * factor) as f32;
-            row[x * 3..x * 3 + 3].copy_from_slice(&[acc[0] / n, acc[1] / n, acc[2] / n]);
-        }
-    });
+    let scale = long_edge.max(1) as f64 / long as f64;
+    let w = ((base.width as f64 * scale).round() as usize).max(1);
+    let h = ((base.height as f64 * scale).round() as usize).max(1);
+    let data = resample_area(&base.data, base.width, base.height, w, h);
     RawFrame {
         width: w,
         height: h,
         data,
         ..base.clone_header()
     }
+}
+
+/// For each output index, the source indices and weights of an area-average (box) reduction from
+/// `n_in` to `n_out` samples.
+fn area_weights(n_in: usize, n_out: usize) -> Vec<Vec<(usize, f32)>> {
+    let s = n_in as f64 / n_out as f64;
+    (0..n_out)
+        .map(|o| {
+            let (a, b) = (o as f64 * s, ((o + 1) as f64 * s).min(n_in as f64));
+            let mut taps = Vec::new();
+            let mut i = a.floor() as usize;
+            while (i as f64) < b && i < n_in {
+                let cover = (b.min(i as f64 + 1.0) - a.max(i as f64)).max(0.0);
+                if cover > 0.0 {
+                    taps.push((i, (cover / (b - a)) as f32));
+                }
+                i += 1;
+            }
+            taps
+        })
+        .collect()
+}
+
+/// Area-average resample of interleaved RGB (for reductions; each output pixel is the mean of the
+/// input area it covers).
+pub fn resample_area(data: &[f32], w: usize, h: usize, nw: usize, nh: usize) -> Vec<f32> {
+    let wx = area_weights(w, nw);
+    let wy = area_weights(h, nh);
+    // Rows first (w -> nw), then columns (h -> nh).
+    let mut rows = vec![0.0f32; nw * h * 3];
+    rows.par_chunks_mut(nw * 3)
+        .enumerate()
+        .for_each(|(y, out)| {
+            let src = &data[y * w * 3..(y + 1) * w * 3];
+            for (x, taps) in wx.iter().enumerate() {
+                let mut acc = [0.0f32; 3];
+                for &(i, k) in taps {
+                    for c in 0..3 {
+                        acc[c] += src[i * 3 + c] * k;
+                    }
+                }
+                out[x * 3..x * 3 + 3].copy_from_slice(&acc);
+            }
+        });
+    let mut out = vec![0.0f32; nw * nh * 3];
+    out.par_chunks_mut(nw * 3).enumerate().for_each(|(y, dst)| {
+        for &(j, k) in &wy[y] {
+            let src = &rows[j * nw * 3..(j + 1) * nw * 3];
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d += s * k;
+            }
+        }
+    });
+    out
 }
 
 fn superpixel(frame: &RawFrame, cfa: &pe_raw::Cfa) -> RawFrame {
@@ -330,5 +371,17 @@ mod tests {
         for c in 0..3 {
             assert!((draft.data[c] - full.data[c]).abs() < 1e-4, "channel {c}");
         }
+    }
+
+    #[test]
+    fn area_resample_preserves_mean_and_flat_colour() {
+        let (w, h) = (7, 5);
+        let data: Vec<f32> = (0..w * h).flat_map(|i| [i as f32, 1.0, 2.0]).collect();
+        let out = super::resample_area(&data, w, h, 3, 2);
+        let mean = |d: &[f32]| d.chunks(3).map(|p| p[0]).sum::<f32>() / (d.len() / 3) as f32;
+        assert!((mean(&out) - mean(&data)).abs() < 1e-3);
+        assert!(out
+            .chunks(3)
+            .all(|p| (p[1] - 1.0).abs() < 1e-5 && (p[2] - 2.0).abs() < 1e-5));
     }
 }

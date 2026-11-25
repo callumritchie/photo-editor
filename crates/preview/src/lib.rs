@@ -1,8 +1,12 @@
-//! Previews: thumbnail generation and the thumbnail store.
+//! Previews: thumbnails and loupe previews, and the stores that cache them.
 //!
-//! M1 provides grid thumbnails built from the camera's embedded preview (fast, no raw decode),
-//! stored as JPEG blobs in a small SQLite database next to the catalog. Rendered preview pyramids
-//! keyed by settings digest arrive in M4.
+//! Two levels, each a JPEG keyed by what it shows:
+//! - grid thumbnails (512 px, `thumbs.sqlite`): the camera's embedded preview for unedited photos
+//!   ([`EMBEDDED`]), otherwise a render keyed by the develop-settings digest;
+//! - loupe previews (2048 px, `previews.sqlite`): always a render, keyed by the settings digest, with a
+//!   size budget and least-recently-used eviction.
+//!
+//! [`render_previews`] produces both levels from one decode, on the GPU when one is available.
 
 use std::path::Path;
 
@@ -137,6 +141,7 @@ pub struct ThumbStore {
 impl ThumbStore {
     pub fn open(path: &Path) -> Result<Self, PreviewError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -224,6 +229,175 @@ impl ThumbStore {
     }
 }
 
+/// Long edge of loupe previews, in pixels.
+pub const PREVIEW_LONG_EDGE: u32 = 2048;
+
+/// A loupe preview and grid thumbnail rendered together: (width, height, JPEG) each.
+pub struct Rendered {
+    pub preview: (u32, u32, Vec<u8>),
+    pub thumb: (u32, u32, Vec<u8>),
+}
+
+/// Render a photo with `settings` at preview size (on `gpu` if given) and encode both cache levels.
+/// Raws go through the pipeline; other files (JPEG) are shown as they are.
+pub fn render_previews(
+    path: &Path,
+    orientation: u8,
+    settings: &pe_pipeline::Settings,
+    gpu: Option<&pe_gpu::Gpu>,
+) -> Result<Rendered, PreviewError> {
+    let img = if matches!(meta::file_kind(path), Some(FileKind::Raw)) {
+        let frame = pe_raw::decode_file(path)?;
+        let small = pe_pipeline::prepare_preview(&frame, PREVIEW_LONG_EDGE as usize);
+        drop(frame);
+        let gpu_rgba = gpu.and_then(|g| {
+            let f = g.upload(&small).ok()?;
+            g.render(&f, settings).ok()
+        });
+        match gpu_rgba {
+            Some((w, h, rgba)) => {
+                let rgb = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+                RgbImage::from_raw(w, h, rgb).ok_or(PreviewError::NoPreview)?
+            }
+            None => {
+                let out = pe_pipeline::render(&small, settings)
+                    .map_err(|e| PreviewError::Render(e.to_string()))?;
+                let data = out.data.iter().map(|v| (v * 255.0 + 0.5) as u8).collect();
+                RgbImage::from_raw(out.width as u32, out.height as u32, data)
+                    .ok_or(PreviewError::NoPreview)?
+            }
+        }
+    } else {
+        quick_image(path, orientation, PREVIEW_LONG_EDGE)?
+    };
+    let p = fit(&img, PREVIEW_LONG_EDGE);
+    let t = fit(&img, THUMB_LONG_EDGE);
+    Ok(Rendered {
+        preview: (p.width(), p.height(), encode_jpeg(&p, 85)?),
+        thumb: (t.width(), t.height(), encode_jpeg(&t, 82)?),
+    })
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// SQLite store of loupe previews keyed by image id, with a size budget.
+pub struct PreviewStore {
+    conn: Connection,
+}
+
+impl PreviewStore {
+    pub fn open(path: &Path) -> Result<Self, PreviewError> {
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             CREATE TABLE IF NOT EXISTS previews (
+                 image_id INTEGER PRIMARY KEY,
+                 width INTEGER NOT NULL,
+                 height INTEGER NOT NULL,
+                 digest TEXT NOT NULL,
+                 jpeg BLOB NOT NULL,
+                 bytes INTEGER NOT NULL,
+                 accessed INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS previews_accessed ON previews (accessed);",
+        )?;
+        Ok(Self { conn })
+    }
+
+    pub fn put(
+        &self,
+        image_id: i64,
+        width: u32,
+        height: u32,
+        jpeg: &[u8],
+        digest: &str,
+    ) -> Result<(), PreviewError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO previews (image_id, width, height, digest, jpeg, bytes, accessed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![image_id, width, height, digest, jpeg, jpeg.len() as i64, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Preview JPEG and the digest it was rendered for; marks it as recently used.
+    pub fn get(&self, image_id: i64) -> Result<Option<(Vec<u8>, String)>, PreviewError> {
+        let row: Option<(Vec<u8>, String)> = self
+            .conn
+            .query_row(
+                "SELECT jpeg, digest FROM previews WHERE image_id = ?1",
+                [image_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if row.is_some() {
+            self.conn.execute(
+                "UPDATE previews SET accessed = ?2 WHERE image_id = ?1",
+                params![image_id, now_secs()],
+            )?;
+        }
+        Ok(row)
+    }
+
+    /// Digest of the stored preview, without reading the image.
+    pub fn digest(&self, image_id: i64) -> Result<Option<String>, PreviewError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT digest FROM previews WHERE image_id = ?1",
+                [image_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn remove(&self, image_id: i64) -> Result<(), PreviewError> {
+        self.conn
+            .execute("DELETE FROM previews WHERE image_id = ?1", [image_id])?;
+        Ok(())
+    }
+
+    /// Total size of stored previews in bytes.
+    pub fn total_bytes(&self) -> Result<i64, PreviewError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COALESCE(SUM(bytes), 0) FROM previews", [], |r| {
+                r.get(0)
+            })?)
+    }
+
+    /// Delete least-recently-used previews until the total is at most `max_bytes`. Returns how many
+    /// were removed.
+    pub fn evict_to(&self, max_bytes: i64) -> Result<usize, PreviewError> {
+        let mut total = self.total_bytes()?;
+        if total <= max_bytes {
+            return Ok(0);
+        }
+        let victims: Vec<(i64, i64)> = self
+            .conn
+            .prepare("SELECT image_id, bytes FROM previews ORDER BY accessed, image_id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut removed = 0;
+        for (id, bytes) in victims {
+            if total <= max_bytes {
+                break;
+            }
+            self.remove(id)?;
+            total -= bytes;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +421,25 @@ mod tests {
         assert!(s.has(1).unwrap());
         s.remove(1).unwrap();
         assert!(!s.has(1).unwrap());
+    }
+
+    #[test]
+    fn preview_store_evicts_least_recently_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = PreviewStore::open(&dir.path().join("p.sqlite")).unwrap();
+        for id in 1..=3 {
+            s.put(id, 1, 1, &[0u8; 100], "d").unwrap();
+        }
+        // Make 1 the most recently used.
+        s.conn
+            .execute(
+                "UPDATE previews SET accessed = accessed - 10 WHERE image_id != 1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(s.total_bytes().unwrap(), 300);
+        assert_eq!(s.evict_to(150).unwrap(), 2);
+        assert!(s.get(1).unwrap().is_some());
+        assert!(s.digest(2).unwrap().is_none() && s.digest(3).unwrap().is_none());
     }
 }

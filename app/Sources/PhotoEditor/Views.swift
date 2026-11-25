@@ -46,6 +46,8 @@ struct PhotoEditorApp: App {
             CommandGroup(after: .newItem) {
                 Button("Import Photos…") { state.showImport = true }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
+                Button("Build Previews") { state.buildPreviews() }
+                    .help("Render loupe previews for the selected photos (or all shown) in the background")
                 Button("Export…") { state.showExport = true }
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(state.exportTargets.isEmpty)
@@ -136,6 +138,21 @@ struct StatusBar: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
+        VStack(spacing: 0) {
+            importStatus
+            if state.pendingRenders > 0 && state.importProgress == nil {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Rendering previews · \(state.pendingRenders) left").font(.callout)
+                }
+                .padding(8)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .padding(.bottom, 12)
+            }
+        }
+    }
+
+    @ViewBuilder private var importStatus: some View {
         if let p = state.importProgress {
             HStack {
                 ProgressView(value: Double(p.done), total: Double(max(p.total, 1))).frame(width: 200)
@@ -327,7 +344,10 @@ struct LoupeImage: View {
         .onKeyPress { press in state.handleKey(press.characters) ? .handled : .ignored }
         .onTapGesture(count: 2) { state.mode = .grid }
         .task(id: item.id) {
-            fallback = await state.thumbnail(item.id)
+            fallback = nil
+            if let cached = await state.cachedPreview(item.id) { fallback = cached }
+            else { fallback = await state.thumbnail(item.id) }
+            state.prefetchAround(item.id)
             if !model.isRaw {
                 let (path, o) = (item.path, item.orientation)
                 fallback = await Task.detached { Core.quickImage(path: path, orientation: o, longEdge: 2560) }.value ?? fallback

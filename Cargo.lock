@@ -1466,6 +1466,7 @@ dependencies = [
  "image",
  "pe-develop",
  "pe-export",
+ "pe-gpu",
  "pe-pipeline",
  "pe-preview",
  "pe-raw",
@@ -1575,6 +1576,7 @@ name = "pe-preview"
 version = "0.0.1"
 dependencies = [
  "image",
+ "pe-gpu",
  "pe-pipeline",
  "pe-raw",
  "rusqlite",
