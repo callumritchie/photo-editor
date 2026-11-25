@@ -27,6 +27,12 @@ final class AppState: ObservableObject {
     @Published var importProgress: (done: Int, total: Int)?
     @Published var lastReport: ImportReport?
 
+    @Published var copiedSettings: DevelopSettings?
+    @Published var presets: [PresetItem] = []
+    /// Bumped per image when its edits change, so grid cells reload their thumbnail.
+    @Published var thumbVersion: [Int64: Int] = [:]
+    @Published private(set) var develop: DevelopModel?
+
     let thumbCache = NSCache<NSNumber, NSImage>()
 
     init() {
@@ -43,7 +49,7 @@ final class AppState: ObservableObject {
         // Development aids for smoke tests: PE_START_MODE=loupe, PE_START_INDEX=n.
         let envs = ProcessInfo.processInfo.environment
         if let i = Int(envs["PE_START_INDEX"] ?? ""), images.indices.contains(i) { select(images[i].id) }
-        if envs["PE_START_MODE"] == "loupe" { mode = .loupe }
+        mode = envs["PE_START_MODE"] == "loupe" ? .loupe : .grid
     }
 
     var focusedItem: ImageItem? { images.first { $0.id == focused } }
@@ -55,6 +61,7 @@ final class AppState: ObservableObject {
         do {
             folders = try core.folders()
             images = try core.images(q)
+            presets = (try? core.presets()) ?? []
             selection = selection.filter { id in images.contains { $0.id == id } }
             if let f = focused, !images.contains(where: { $0.id == f }) { focused = images.first?.id }
             if focused == nil { focused = images.first?.id }
@@ -70,6 +77,63 @@ final class AppState: ObservableObject {
         if let img { thumbCache.setObject(img, forKey: NSNumber(value: id)) }
         return img
     }
+
+    // MARK: develop
+
+    /// The editing session for the focused photo (created on demand in loupe mode).
+    func developSession() -> DevelopModel? {
+        guard let core, let item = focusedItem else { return nil }
+        if develop?.item.id != item.id {
+            develop = DevelopModel(item: item, core: core) { [weak self] id in self?.editsChanged([id]) }
+        }
+        return develop
+    }
+
+    func editsChanged(_ ids: [Int64]) {
+        for id in ids {
+            thumbCache.removeObject(forKey: NSNumber(value: id))
+            thumbVersion[id, default: 0] += 1
+        }
+    }
+
+    private func runDevelop(_ ids: [Int64], _ command: [String: Any]) {
+        guard let core, !ids.isEmpty else { return }
+        do {
+            try core.develop(ids, command)
+            editsChanged(ids)
+            if let d = develop, ids.contains(d.item.id) { develop = nil; _ = developSession() }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Paste copied settings (look groups) onto the selection.
+    func pasteSettings() {
+        guard let s = copiedSettings else { return }
+        let groups = DevelopSchema.shared.groups.filter(\.look).map(\.id)
+        runDevelop(targets, ["command": "paste", "settings": s.jsonObject, "groups": groups])
+    }
+
+    /// Apply `settings` (look groups) to every selected photo except the focused one.
+    func syncSettings(from settings: DevelopSettings) {
+        let groups = DevelopSchema.shared.groups.filter(\.look).map(\.id)
+        let ids = Array(selection.subtracting([focused ?? -1]))
+        runDevelop(ids, ["command": "paste", "settings": settings.jsonObject, "groups": groups, "label": "Sync Settings"])
+    }
+
+    func savePreset(name: String, groups: [String], settings: DevelopSettings) {
+        guard let core else { return }
+        do {
+            try core.savePreset(name: name, groups: groups, settings: settings)
+            presets = try core.presets()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func deletePreset(_ id: Int64) {
+        core?.deletePreset(id)
+        presets = (try? core?.presets()) ?? []
+    }
+
+    func undo() { if mode == .loupe { developSession()?.undo() } }
+    func redo() { if mode == .loupe { developSession()?.redo() } }
 
     // MARK: selection and navigation
 
@@ -93,7 +157,7 @@ final class AppState: ObservableObject {
         select(images[j].id)
     }
 
-    private var targets: [Int64] {
+    var targets: [Int64] {
         if selection.isEmpty, let f = focused { return [f] }
         return Array(selection)
     }

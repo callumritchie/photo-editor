@@ -7,7 +7,7 @@ software vendor.
 
 ## Status
 
-**M0, M1 and M2 done.** There is a working Mac app (photo library, import, grid, loupe), and the core decodes and renders raws.
+**M0–M3 done.** There is a working Mac app (photo library, import, grid, and an editing view with live sliders, history, snapshots and presets), and the core decodes and renders raws.
 
 **Rendering (M2).** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
 and renders them on the CPU:
@@ -48,9 +48,15 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   Suspected duplicates are skipped. Imports are crash-safe and resumable.
 - **Grid:** folders in the sidebar, rating filter, thumbnail size. Keys: `0`–`5` rating, `P` pick, `X` reject, `U` unflag,
   `6`–`9` red/yellow/green/blue label, arrows to move, `Return`/`Space` to open in the loupe.
-- **Loupe:** shows the camera's embedded preview immediately, then the full render from our own pipeline. `Esc` returns to the grid.
+- **Edit (loupe):** `Return` on a photo opens it with the Develop panel: white balance (as shot / auto / custom temperature and tint),
+  exposure, contrast, highlights, shadows, whites and blacks. Sliders update a live preview while you drag (about 50–200 ms per
+  render on the CPU). Each release records one history step. ⌘Z/⇧⌘Z undo and redo; click any history step to return to it.
+  You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
+  selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.
+  `Esc` returns to the grid.
 
-Command-line equivalents: `pe new`, `pe import [--copy-to DIR --template "%Y/%Y-%m-%d"]`, `pe ls`, `pe folders`, `pe thumb`.
+Command-line equivalents: `pe new`, `pe import [--copy-to DIR --template "%Y/%Y-%m-%d"]`, `pe ls`, `pe folders`, `pe thumb`,
+`pe develop LIB ID --command '{"command":"set","settings":{"exposure":0.5}}'` (also `undo`, `redo`, `reset`, `applyPreset`, …).
 
 ## Layout
 
@@ -59,7 +65,8 @@ Command-line equivalents: `pe new`, `pe import [--copy-to DIR --template "%Y/%Y-
 | `crates/raw` (`pe-raw`) | Raw decoding into a decoder-independent `RawFrame` |
 | `crates/colour` (`pe-colour`) | Matrix maths, primaries, transfer functions, camera → output colour |
 | `crates/pipeline` (`pe-pipeline`) | CPU reference render pipeline (demosaic and later stages) |
-| `crates/catalog` (`pe-catalog`) | Photo library: SQLite catalog, import, queries, ratings/flags/labels |
+| `crates/develop` (`pe-develop`) | Editing model: slider schema, groups, settings digest, history labels |
+| `crates/catalog` (`pe-catalog`) | Photo library: SQLite catalog, import, queries, ratings/flags/labels, develop history/snapshots/presets |
 | `crates/preview` (`pe-preview`) | Thumbnails and quick previews; rendered preview cache comes in M4 |
 | `crates/export` (`pe-export`) | Export (M5) |
 | `crates/ffi` (`pe-ffi`) | C interface used by the Mac app |

@@ -80,6 +80,7 @@ private final class ProgressBox {
 
 final class Core: @unchecked Sendable {
     private let handle: OpaquePointer
+    var handlePointer: OpaquePointer { handle }
 
     init(catalogPath: String) throws {
         var err: UnsafeMutablePointer<CChar>?
@@ -149,12 +150,14 @@ final class Core: @unchecked Sendable {
         return makeImage(p, Int(w), Int(h))
     }
 
-    static func render(path: String, longEdge: Int) -> NSImage? {
+    static func render(path: String, settingsJSON: String? = nil, longEdge: Int) -> NSImage? {
         var w: UInt32 = 0, h: UInt32 = 0
-        guard let p = pe_render(path, nil, UInt32(longEdge), &w, &h) else { return nil }
+        guard let p = pe_render(path, settingsJSON, UInt32(longEdge), &w, &h) else { return nil }
         defer { pe_bytes_free(p, Int(w) * Int(h) * 4) }
         return makeImage(p, Int(w), Int(h))
     }
+
+    static func imageFromRGBA(_ p: UnsafeMutablePointer<UInt8>, _ w: Int, _ h: Int) -> NSImage? { makeImage(p, w, h) }
 
     private static func makeImage(_ p: UnsafeMutablePointer<UInt8>, _ w: Int, _ h: Int) -> NSImage? {
         let data = Data(bytes: p, count: w * h * 4) as CFData

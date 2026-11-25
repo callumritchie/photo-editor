@@ -59,6 +59,14 @@ enum Cmd {
     },
     /// List folders in a catalog with image counts.
     Folders { catalog: PathBuf },
+    /// Run a develop command (JSON) on images and print their new state, e.g.
+    /// `pe develop Lib.pecat 7 '{"command":"set","settings":{"exposure":0.5}}'`.
+    Develop {
+        catalog: PathBuf,
+        ids: Vec<i64>,
+        #[arg(long)]
+        command: String,
+    },
     /// Write an image's grid thumbnail (JPEG).
     Thumb {
         catalog: PathBuf,
@@ -190,6 +198,19 @@ fn main() -> Result<()> {
             for f in pe_catalog::Catalog::open(&catalog)?.folders()? {
                 println!("{:>6}  {:>6}  {}", f.id, f.image_count, f.path);
             }
+            Ok(())
+        }
+        Cmd::Develop {
+            catalog,
+            ids,
+            command,
+        } => {
+            let mut cat = pe_catalog::Catalog::open(&catalog)?;
+            let cmd: pe_catalog::DevelopCommand = serde_json::from_str(&command)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cat.develop_execute(&ids, &cmd)?)?
+            );
             Ok(())
         }
         Cmd::Thumb {

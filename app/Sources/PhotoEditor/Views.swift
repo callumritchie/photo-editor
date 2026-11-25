@@ -46,6 +46,17 @@ struct PhotoEditorApp: App {
                 Button("Import Photos…") { state.showImport = true }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
             }
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo Edit") { state.undo() }.keyboardShortcut("z", modifiers: .command)
+                Button("Redo Edit") { state.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
+            }
+            CommandMenu("Photo") {
+                Button("Copy Settings") { state.copiedSettings = state.developSession()?.settings }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                Button("Paste Settings") { state.pasteSettings() }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+                    .disabled(state.copiedSettings == nil)
+            }
         }
     }
 }
@@ -231,7 +242,7 @@ struct ThumbCell: View {
         .padding(4)
         .background(RoundedRectangle(cornerRadius: 8).fill(selected ? Color.accentColor.opacity(0.35) : .clear))
         .help("\(item.name)\n\(item.camera ?? "")  \(item.exposureSummary)")
-        .task(id: item.id) { image = await state.thumbnail(item.id) }
+        .task(id: "\(item.id)-\(state.thumbVersion[item.id, default: 0])") { image = await state.thumbnail(item.id) }
     }
 }
 
@@ -249,76 +260,71 @@ func labelColor(_ l: String) -> Color {
 
 struct LoupeView: View {
     @EnvironmentObject var state: AppState
-    @FocusState private var focused: Bool
-    @State private var image: NSImage?
-    @State private var rendered = false
 
     var body: some View {
-        let item = state.focusedItem
+        if let model = state.developSession() {
+            HStack(spacing: 0) {
+                LoupeImage(model: model)
+                Divider()
+                DevelopPanel(model: model)
+            }
+            .id(model.item.id)
+        }
+    }
+}
+
+struct LoupeImage: View {
+    @EnvironmentObject var state: AppState
+    @ObservedObject var model: DevelopModel
+    @FocusState private var focused: Bool
+    @State private var fallback: NSImage?
+
+    var body: some View {
+        let item = model.item
         ZStack(alignment: .bottom) {
             Color.black.opacity(0.92)
             Group {
-                if let image {
+                if let image = model.image ?? fallback {
                     Image(nsImage: image).resizable().scaledToFit().padding(16).padding(.bottom, 36)
                 } else {
                     ProgressView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if let item {
-                HStack(spacing: 14) {
-                    Text(item.name).bold()
-                    Text(item.camera ?? "")
-                    Text(item.lens ?? "").foregroundStyle(.secondary)
-                    Text(item.exposureSummary)
-                    Text(item.captureTime ?? "").foregroundStyle(.secondary)
-                    Spacer()
-                    Text(String(repeating: "★", count: item.rating)).foregroundStyle(.yellow)
-                    if item.flag == "picked" { Image(systemName: "flag.fill") }
-                    if item.flag == "rejected" { Image(systemName: "xmark.circle.fill").foregroundStyle(.red) }
-                    if let l = item.label { Circle().fill(labelColor(l)).frame(width: 10, height: 10) }
-                    Text(rendered ? "rendered" : "preview").font(.caption).foregroundStyle(.secondary)
-                }
-                .font(.callout)
-                .foregroundStyle(.white)
-                .padding(10)
-                .background(.black.opacity(0.55))
+            HStack(spacing: 12) {
+                Text(item.name).bold().lineLimit(1)
+                Text([item.camera ?? "", item.exposureSummary].filter { !$0.isEmpty }.joined(separator: "  ·  "))
+                    .lineLimit(1).truncationMode(.tail).foregroundStyle(.white.opacity(0.85))
+                Spacer(minLength: 8)
+                Text(String(repeating: "★", count: currentRating)).foregroundStyle(.yellow)
+                if let ms = model.lastRenderMs { Text("\(ms) ms").font(.caption).foregroundStyle(.secondary) }
+                if model.loading { ProgressView().controlSize(.small) }
             }
+            .font(.callout)
+            .foregroundStyle(.white)
+            .padding(10)
+            .background(.black.opacity(0.55))
         }
         .focusable()
         .focused($focused)
         .focusEffectDisabled()
         .onAppear { focused = true }
         .onKeyPress(.escape) { state.mode = .grid; return .handled }
-        .onKeyPress(.return) { state.mode = .grid; return .handled }
         .onKeyPress(.leftArrow) { state.move(by: -1); return .handled }
         .onKeyPress(.rightArrow) { state.move(by: 1); return .handled }
         .onKeyPress { press in state.handleKey(press.characters) ? .handled : .ignored }
         .onTapGesture(count: 2) { state.mode = .grid }
-        .task(id: item?.id) { await load(item) }
+        .task(id: item.id) {
+            fallback = await state.thumbnail(item.id)
+            if !model.isRaw {
+                let (path, o) = (item.path, item.orientation)
+                fallback = await Task.detached { Core.quickImage(path: path, orientation: o, longEdge: 2560) }.value ?? fallback
+            }
+            await model.load()
+        }
     }
 
-    private func load(_ item: ImageItem?) async {
-        guard let item else { return }
-        rendered = false
-        image = await state.thumbnail(item.id)
-        let (path, orientation) = (item.path, item.orientation)
-        // 1. Embedded preview at screen size (fast).
-        if let quick = await Task.detached(priority: .userInitiated, operation: {
-            Core.quickImage(path: path, orientation: orientation, longEdge: 2560)
-        }).value, !Task.isCancelled {
-            image = quick
-        }
-        // 2. Full render with our pipeline (slower), for raw files.
-        let isRaw = !["jpg", "jpeg"].contains((path as NSString).pathExtension.lowercased())
-        guard isRaw else { return }
-        if let full = await Task.detached(priority: .utility, operation: {
-            Core.render(path: path, longEdge: 2560)
-        }).value, !Task.isCancelled {
-            image = full
-            rendered = true
-        }
-    }
+    private var currentRating: Int { state.images.first { $0.id == model.item.id }?.rating ?? model.item.rating }
 }
 
 // MARK: - Import
