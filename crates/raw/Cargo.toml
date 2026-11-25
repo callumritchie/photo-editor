@@ -9,3 +9,4 @@ publish.workspace = true
 [dependencies]
 rawler.workspace = true
 thiserror.workspace = true
+image.workspace = true

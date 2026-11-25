@@ -29,6 +29,42 @@ enum Cmd {
     },
     /// Print the default settings as JSON (a starting point for --settings files).
     Settings,
+    /// Create a new, empty catalog (a folder, conventionally named *.pecat).
+    New { catalog: PathBuf },
+    /// Import files or folders into a catalog.
+    Import {
+        catalog: PathBuf,
+        sources: Vec<PathBuf>,
+        /// Copy into this folder (organised by --template) instead of cataloguing in place.
+        #[arg(long)]
+        copy_to: Option<PathBuf>,
+        /// Folder template for --copy-to, from capture date: %Y %m %d %H %M %S.
+        #[arg(long, default_value = "%Y/%Y-%m-%d")]
+        template: String,
+        /// Import files even if they look like duplicates of catalogued files.
+        #[arg(long)]
+        allow_duplicates: bool,
+        /// Only the given folders, not their subfolders.
+        #[arg(long)]
+        no_recurse: bool,
+    },
+    /// List images in a catalog.
+    Ls {
+        catalog: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        min_rating: u8,
+        /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List folders in a catalog with image counts.
+    Folders { catalog: PathBuf },
+    /// Write an image's grid thumbnail (JPEG).
+    Thumb {
+        catalog: PathBuf,
+        id: i64,
+        output: PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -78,6 +114,92 @@ fn main() -> Result<()> {
         } => render(&input, &output, &settings_from(&opts)?),
         Cmd::Settings => {
             println!("{}", serde_json::to_string_pretty(&Settings::default())?);
+            Ok(())
+        }
+        Cmd::New { catalog } => {
+            pe_catalog::Catalog::create(&catalog)?;
+            println!("created {}", catalog.display());
+            Ok(())
+        }
+        Cmd::Import {
+            catalog,
+            sources,
+            copy_to,
+            template,
+            allow_duplicates,
+            no_recurse,
+        } => {
+            let mut cat = pe_catalog::Catalog::open(&catalog)?;
+            let opts = pe_catalog::ImportOptions {
+                mode: match copy_to {
+                    Some(dest) => pe_catalog::ImportMode::Copy { dest, template },
+                    None => pe_catalog::ImportMode::Add,
+                },
+                recursive: !no_recurse,
+                skip_duplicates: !allow_duplicates,
+                ..Default::default()
+            };
+            let t0 = Instant::now();
+            let report = cat.import(&sources, &opts, &mut |p| {
+                eprint!("\r{}/{}", p.done, p.total)
+            })?;
+            eprintln!();
+            println!(
+                "found {}, imported {}, duplicates {}, already in catalog {}, failed {}, missing thumbnails {} ({:.1?})",
+                report.found,
+                report.imported,
+                report.duplicates,
+                report.already_in_catalog,
+                report.failed.len(),
+                report.thumbnails_failed,
+                t0.elapsed()
+            );
+            for (p, e) in &report.failed {
+                println!("  failed: {p}: {e}");
+            }
+            Ok(())
+        }
+        Cmd::Ls {
+            catalog,
+            min_rating,
+            json,
+        } => {
+            let cat = pe_catalog::Catalog::open(&catalog)?;
+            let rows = cat.images(&pe_catalog::Query {
+                min_rating,
+                ..Default::default()
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                for r in rows {
+                    println!(
+                        "{:>6}  {:<19}  {}{:<5}  {:<28}  {}",
+                        r.id,
+                        r.capture_time.as_deref().unwrap_or("-"),
+                        "*".repeat(r.rating as usize),
+                        "",
+                        r.camera.as_deref().unwrap_or("-"),
+                        r.path
+                    );
+                }
+            }
+            Ok(())
+        }
+        Cmd::Folders { catalog } => {
+            for f in pe_catalog::Catalog::open(&catalog)?.folders()? {
+                println!("{:>6}  {:>6}  {}", f.id, f.image_count, f.path);
+            }
+            Ok(())
+        }
+        Cmd::Thumb {
+            catalog,
+            id,
+            output,
+        } => {
+            let cat = pe_catalog::Catalog::open(&catalog)?;
+            let jpeg = cat.thumbnail(id)?.context("no thumbnail available")?;
+            std::fs::write(&output, jpeg)?;
             Ok(())
         }
     }

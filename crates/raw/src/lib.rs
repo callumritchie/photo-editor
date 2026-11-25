@@ -3,6 +3,8 @@
 //! The rest of the codebase only sees `RawFrame`; the decoder backend (currently the
 //! LGPL-2.1 `rawler` crate) is an implementation detail behind [`decode_file`].
 
+pub mod meta;
+
 use std::path::Path;
 
 /// Errors from raw decoding.
