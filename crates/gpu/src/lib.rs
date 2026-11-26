@@ -15,7 +15,7 @@ use bytemuck::{Pod, Zeroable};
 use pe_colour::{ColorSpace, REC2020_TO_XYZ_D65};
 use pe_pipeline::masks::{Combine, MaskParams, PreparedShape};
 use pe_pipeline::{
-    detail, effects, geometry, local, look, masks, tone, wb, Settings, WhiteBalance,
+    detail, effects, geometry, local, look, masks, region, tone, wb, Settings, WhiteBalance,
 };
 use pe_raw::{Layout, RawFrame};
 use wgpu::util::DeviceExt;
@@ -53,6 +53,10 @@ struct Params {
     geo2: [f32; 4],
     geo3: [f32; 4],
     geo4: [u32; 4],
+    /// Whole sensor frame size and this frame's origin in it.
+    full: [u32; 4],
+    /// Output origin and whole-picture output size.
+    outr: [u32; 4],
 }
 
 /// Per-pass record for the generic kernels (matches `struct Pass` in the shader).
@@ -288,6 +292,8 @@ pub struct GpuFrame {
     width: u32,
     height: u32,
     geo: local::Geometry,
+    /// Where this frame sits in the whole picture.
+    ctx: region::Ctx,
     planes: Planes,
     orientation: u8,
     header: RawFrame,
@@ -464,11 +470,16 @@ impl Gpu {
 
     /// Upload a linear-RGB frame and allocate everything needed to render it.
     pub fn upload(&self, frame: &RawFrame) -> Result<GpuFrame, GpuError> {
+        self.upload_region(frame, region::Ctx::whole(frame.width, frame.height))
+    }
+
+    /// Upload a linear-RGB frame that is part of a larger picture (`ctx`), for region renders.
+    pub fn upload_region(&self, frame: &RawFrame, ctx: region::Ctx) -> Result<GpuFrame, GpuError> {
         if !matches!(frame.layout, Layout::LinearRgb) {
             return Err(GpuError::NotLinear);
         }
         let (w, h) = (frame.width, frame.height);
-        let geo = local::geometry(w, h);
+        let geo = local::geometry_in(w, h, ctx.full_w, ctx.full_h);
         let n = (w * h) as u32;
         let m = (geo.small_w * geo.small_h) as u32;
         let planes = Planes {
@@ -525,6 +536,7 @@ impl Gpu {
             width: w as u32,
             height: h as u32,
             geo,
+            ctx,
             planes,
             orientation: frame.orientation,
             header: frame.clone_header(),
@@ -568,10 +580,33 @@ impl Gpu {
         f: &GpuFrame,
         settings: &Settings,
     ) -> Result<(u32, u32, Vec<u8>), GpuError> {
+        self.render_in(f, settings, None, &region::Globals::default())
+    }
+
+    /// Render the output rectangle `out` (whole-picture output coordinates) of a frame uploaded with
+    /// [`upload_region`](Self::upload_region), with whole-picture measurements where supplied.
+    pub fn render_region(
+        &self,
+        f: &GpuFrame,
+        settings: &Settings,
+        out: [usize; 4],
+        globals: &region::Globals,
+    ) -> Result<(u32, u32, Vec<u8>), GpuError> {
+        self.render_in(f, settings, Some(out), globals)
+    }
+
+    fn render_in(
+        &self,
+        f: &GpuFrame,
+        settings: &Settings,
+        out: Option<[usize; 4]>,
+        globals: &region::Globals,
+    ) -> Result<(u32, u32, Vec<u8>), GpuError> {
         let _busy = f.busy.lock().unwrap();
         let s = settings.clone().clamped();
+        let ctx = f.ctx;
         let wbm = match s.white_balance {
-            WhiteBalance::Auto => f.auto_wb,
+            WhiteBalance::Auto => globals.auto_wb.unwrap_or(f.auto_wb),
             ref mode => wb::multipliers(&f.header, mode, &[]),
         };
         let to_work = pe_colour::camera_to_space(&f.header.xyz_to_cam, &REC2020_TO_XYZ_D65)
@@ -581,18 +616,30 @@ impl Gpu {
         let tp = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
         let (sev, hev) = tone::local_tone_amounts(s.shadows, s.highlights);
         let use_sh = s.shadows != 0.0 || s.highlights != 0.0;
-        let mask_geo =
-            geometry::GeometryParams::new(&s, f.width as usize, f.height as usize, f.orientation);
+        let mask_geo = geometry::GeometryParams::new(&s, ctx.full_w, ctx.full_h, f.orientation);
         let mp = MaskParams::new(&s.masks, &s.rasters, mask_geo.frame_w, mask_geo.frame_h);
         let (use_cl, use_tx) = (
             s.clarity != 0.0 || mp.needs_clarity,
             s.texture != 0.0 || mp.needs_texture,
         );
-        let geo =
-            geometry::GeometryParams::new(&s, f.width as usize, f.height as usize, f.orientation);
+        let mut geo = geometry::GeometryParams::new(&s, ctx.full_w, ctx.full_h, f.orientation);
         let orientation = geo.orientation;
-        let (ow, oh) = geo.output_size();
-        let (ow, oh) = (ow as u32, oh as u32);
+        // A region always goes through the geometry pass; with no geometry set, its output is the
+        // oriented frame.
+        let use_geometry = geo.active || out.is_some();
+        if !geo.active {
+            geo.out_w = geo.frame_w;
+            geo.out_h = geo.frame_h;
+            geo.crop = [0.0, 0.0, 1.0, 1.0];
+        }
+        let (full_ow, full_oh) = (geo.out_w as u32, geo.out_h as u32);
+        let [ox, oy, ow, oh] = match out {
+            Some(r) => r.map(|v| v as u32),
+            None => [0, 0, full_ow, full_oh],
+        };
+        if (ow as u64) * (oh as u64) > f.width as u64 * f.height as u64 {
+            return Err(GpuError::TooLarge((ow as u64) * (oh as u64) * 4));
+        }
 
         // Scene pixel from the kept camera data, exactly as the CPU path computes it.
         let fw = f.width as usize;
@@ -605,7 +652,7 @@ impl Gpu {
                 gain,
             );
             if geo.lens_vignette != 0.0 {
-                let g = geo.lens_gain(x, y);
+                let g = geo.lens_gain(x + ctx.x0, y + ctx.y0);
                 c.map(|v| v * g)
             } else {
                 c
@@ -613,7 +660,9 @@ impl Gpu {
         };
         let (wu, hu) = (f.width as usize, f.height as usize);
         // Airlight from the same sampled scene pixels the CPU path uses.
-        let airlight = if s.dehaze != 0.0 {
+        let airlight = if let (true, Some(a)) = (s.dehaze != 0.0, globals.airlight) {
+            a
+        } else if s.dehaze != 0.0 {
             let samples: Vec<[f32; 3]> = (0..hu)
                 .step_by(local::AIRLIGHT_STRIDE)
                 .flat_map(|y| (0..wu).step_by(local::AIRLIGHT_STRIDE).map(move |x| (x, y)))
@@ -625,7 +674,9 @@ impl Gpu {
         };
         let detail_params = {
             let probe = detail::DetailParams::new(&s, [0.0; 3], f.scale);
-            let noise = if probe.nr {
+            let noise = if let (true, Some(n)) = (probe.nr, globals.noise) {
+                n
+            } else if probe.nr {
                 // Measured without exposure and scaled by sqrt(gain), as the CPU path does.
                 let key = [
                     wbm[0].to_bits(),
@@ -642,7 +693,7 @@ impl Gpu {
                             let c = [f.host[i], f.host[i + 1], f.host[i + 2]];
                             let c = pe_pipeline::scene_pixel(c, wbm, &to_work, 1.0);
                             if geo.lens_vignette != 0.0 {
-                                let g = geo.lens_gain(x, y);
+                                let g = geo.lens_gain(x + ctx.x0, y + ctx.y0);
                                 c.map(|v| v * g)
                             } else {
                                 c
@@ -718,10 +769,17 @@ impl Gpu {
             geo2: [geo.inv_scale, geo.k1, geo.lens_vignette, 0.0],
             geo3: [geo.ca[0], geo.ca[1], geo.ca[2], 0.0],
             geo4: [geo.frame_w as u32, geo.frame_h as u32, 0, 0],
+            full: [
+                ctx.full_w as u32,
+                ctx.full_h as u32,
+                ctx.x0 as u32,
+                ctx.y0 as u32,
+            ],
+            outr: [ox, oy, full_ow, full_oh],
         };
         self.queue
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));
-        let fx = effects::EffectsParams::new(&s, ow as usize, oh as usize);
+        let fx = effects::EffectsParams::new(&s, full_ow as usize, full_oh as usize);
         let lu = LookUniform::new(&look::LookParams::new(&s), &fx);
         let (mrec, mdata) = pack_masks(&mp);
         self.queue
@@ -864,7 +922,7 @@ impl Gpu {
                 fw * fh,
             ));
         }
-        if geo.active {
+        if use_geometry {
             list.push(full(Kernel::Display, 0, pl.tex_h, 0, 0, 0, [0.0; 4]));
             list.push((
                 Kernel::Geometry,

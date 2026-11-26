@@ -27,6 +27,8 @@ struct Params {
     geo2: vec4<f32>,      // 1 / scale, distortion k1, lens vignetting (stops), unused
     geo3: vec4<f32>,      // chromatic aberration scale R, G, B, unused
     geo4: vec4<u32>,      // corrected frame width, height, unused, unused
+    full: vec4<u32>,      // whole sensor frame width, height; this frame's origin x, y
+    outr: vec4<u32>,      // output origin x, y; whole-picture output width, height
 };
 
 // Per-pass parameters for the generic kernels.
@@ -130,10 +132,10 @@ fn scene_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let b = reconstruct(cam);
     var w = vec3<f32>(dot(P.m0.xyz, b), dot(P.m1.xyz, b), dot(P.m2.xyz, b)) * P.wb.w;
     if (P.geo2.z != 0.0) {
-        let sw = f32(P.dims.x);
-        let sh = f32(P.dims.y);
-        let dx = f32(i % P.dims.x) + 0.5 - sw * 0.5;
-        let dy = f32(i / P.dims.x) + 0.5 - sh * 0.5;
+        let sw = f32(P.full.x);
+        let sh = f32(P.full.y);
+        let dx = f32(i % P.dims.x + P.full.z) + 0.5 - sw * 0.5;
+        let dy = f32(i / P.dims.x + P.full.w) + 0.5 - sh * 0.5;
         w *= exp2(P.geo2.z * (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25));
     }
     pool[P.offs.x + i] = vec4<f32>(w, log2(max(luma(w), 1.0e-6)));
@@ -586,10 +588,10 @@ fn mask_oklab(d: vec3<f32>) -> vec3<f32> {
 
 // Oriented-frame position of sensor pixel (x, y) (masks::frame_position).
 fn frame_pos(x: u32, y: u32) -> vec2<f32> {
-    let sx = f32(x) + 0.5;
-    let sy = f32(y) + 0.5;
-    let sw = f32(P.dims.x);
-    let sh = f32(P.dims.y);
+    let sx = f32(x + P.full.z) + 0.5;
+    let sy = f32(y + P.full.w) + 0.5;
+    let sw = f32(P.full.x);
+    let sh = f32(P.full.y);
     switch P.dims2.z {
         case 2u: { return vec2<f32>(sw - sx, sy); }
         case 3u: { return vec2<f32>(sw - sx, sh - sy); }
@@ -756,7 +758,7 @@ fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
 
 // Effects at output (x, y), conversion to the output space and 8-bit packing.
 fn finish(e0: vec3<f32>, x: u32, y: u32) -> u32 {
-    let e = effects(e0, x, y, P.dims3.x, P.dims3.y);
+    let e = effects(e0, x + P.outr.x, y + P.outr.y, P.outr.z, P.outr.w);
     let lin = gamut_map(vec3<f32>(dot(P.o0.xyz, e), dot(P.o1.xyz, e), dot(P.o2.xyz, e)));
     let enc = vec3<f32>(srgb_encode(lin.x), srgb_encode(lin.y), srgb_encode(lin.z));
     let q = vec3<u32>(enc * 255.0 + vec3<f32>(0.5));
@@ -788,8 +790,8 @@ fn display_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
 fn geo_source(x: u32, y: u32, c: u32) -> vec2<f32> {
     let fw = f32(P.geo4.x);
     let fh = f32(P.geo4.y);
-    let xt = (P.geo0.x + (f32(x) + 0.5) / f32(P.dims3.x) * (P.geo0.z - P.geo0.x)) * fw;
-    let yt = (P.geo0.y + (f32(y) + 0.5) / f32(P.dims3.y) * (P.geo0.w - P.geo0.y)) * fh;
+    let xt = (P.geo0.x + (f32(x + P.outr.x) + 0.5) / f32(P.outr.z) * (P.geo0.z - P.geo0.x)) * fw;
+    let yt = (P.geo0.y + (f32(y + P.outr.y) + 0.5) / f32(P.outr.w) * (P.geo0.w - P.geo0.y)) * fh;
     let cx = xt - fw * 0.5;
     let cy = yt - fh * 0.5;
     let rx = cx * P.geo1.x + cy * P.geo1.y;
@@ -799,8 +801,8 @@ fn geo_source(x: u32, y: u32, c: u32) -> vec2<f32> {
     let wq = 1.0 + P.geo1.z * nx + P.geo1.w * ny;
     let px = nx / wq * P.geo2.x * fw * 0.5 + fw * 0.5;
     let py = ny / wq * P.geo2.x * fh * 0.5 + fh * 0.5;
-    let sw = f32(P.dims.x);
-    let sh = f32(P.dims.y);
+    let sw = f32(P.full.x);
+    let sh = f32(P.full.y);
     var s = vec2<f32>(px, py);
     switch P.dims2.z {
         case 2u: { s = vec2<f32>(sw - px, py); }
@@ -816,7 +818,8 @@ fn geo_source(x: u32, y: u32, c: u32) -> vec2<f32> {
     let dy = s.y - sh * 0.5;
     let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
     let f = (1.0 + P.geo2.y * r2) * P.geo3[c];
-    return vec2<f32>(sw * 0.5 + dx * f, sh * 0.5 + dy * f);
+    // Into this frame's pixel coordinates.
+    return vec2<f32>(sw * 0.5 + dx * f - f32(P.full.z), sh * 0.5 + dy * f - f32(P.full.w));
 }
 
 fn geo_sample(off: u32, p: vec2<f32>, c: u32) -> f32 {
