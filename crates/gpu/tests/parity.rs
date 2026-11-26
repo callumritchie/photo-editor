@@ -69,6 +69,47 @@ fn cases() -> Vec<(&'static str, Settings)> {
             Settings {
                 apply_orientation: false,
                 exposure: 1.5,
+                ..d.clone()
+            },
+        ),
+        (
+            "vibrance, saturation, mixer",
+            Settings {
+                vibrance: 60.0,
+                saturation: -20.0,
+                hsl: pe_pipeline::Hsl {
+                    hue: [30.0, -20.0, 10.0, 40.0, -30.0, 25.0, 0.0, -50.0],
+                    saturation: [-40.0, 30.0, 20.0, -60.0, 50.0, 40.0, -10.0, 0.0],
+                    luminance: [20.0, -30.0, 40.0, -50.0, 10.0, -40.0, 30.0, 0.0],
+                },
+                ..d.clone()
+            },
+        ),
+        (
+            "black & white, grading",
+            Settings {
+                treatment: pe_pipeline::Treatment::Monochrome,
+                bw_mix: [40.0, 20.0, -30.0, -60.0, 0.0, 50.0, 10.0, -20.0],
+                grading: pe_pipeline::Grading {
+                    shadows: pe_pipeline::GradeWheel {
+                        hue: 220.0,
+                        saturation: 60.0,
+                        luminance: -10.0,
+                    },
+                    highlights: pe_pipeline::GradeWheel {
+                        hue: 45.0,
+                        saturation: 40.0,
+                        luminance: 15.0,
+                    },
+                    global: pe_pipeline::GradeWheel {
+                        hue: 300.0,
+                        saturation: 10.0,
+                        luminance: 5.0,
+                    },
+                    blending: 80.0,
+                    balance: -30.0,
+                    ..Default::default()
+                },
                 ..d
             },
         ),

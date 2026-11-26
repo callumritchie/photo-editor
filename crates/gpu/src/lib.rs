@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use bytemuck::{Pod, Zeroable};
 use pe_colour::{ColorSpace, REC2020_TO_XYZ_D65};
-use pe_pipeline::{tone, wb, Settings, WhiteBalance};
+use pe_pipeline::{look, tone, wb, Settings, WhiteBalance};
 use pe_raw::{Layout, RawFrame};
 use wgpu::util::DeviceExt;
 
@@ -36,6 +36,44 @@ struct Params {
     dims: [u32; 4],
     dims2: [u32; 4],
     dims3: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LookUniform {
+    flags: [f32; 4],
+    lms: [[f32; 4]; 3],
+    rgb: [[f32; 4]; 3],
+    centres: [f32; 8],
+    band_hue: [f32; 8],
+    band_sat: [f32; 8],
+    band_lum: [f32; 8],
+    band_bw: [f32; 8],
+    grade: [[f32; 4]; 4],
+    shape: [f32; 4],
+}
+
+impl LookUniform {
+    fn new(p: &look::LookParams) -> Self {
+        let g = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
+        Self {
+            flags: [
+                p.enabled as u8 as f32,
+                p.monochrome as u8 as f32,
+                p.saturation_gain,
+                p.vibrance,
+            ],
+            lms: p.lms_from_rgb.map(row4),
+            rgb: p.rgb_from_lms.map(row4),
+            centres: p.centres,
+            band_hue: p.band_hue,
+            band_sat: p.band_sat,
+            band_lum: p.band_lum,
+            band_bw: p.band_bw,
+            grade: p.grade.map(g),
+            shape: [p.grade_width, p.grade_balance, 0.0, 0.0],
+        }
+    }
 }
 
 const ENTRY_POINTS: [&str; 7] = [
@@ -69,6 +107,7 @@ pub struct GpuFrame {
     header: RawFrame,
     auto_wb: [f32; 3],
     params: wgpu::Buffer,
+    look: wgpu::Buffer,
     lut: wgpu::Buffer,
     lut_state: Mutex<Option<Vec<[f32; 2]>>>,
     out: wgpu::Buffer,
@@ -152,9 +191,9 @@ impl Gpu {
             count: None,
         };
         let storage = |read_only| wgpu::BufferBindingType::Storage { read_only };
-        let entries: Vec<_> = (0..=9)
+        let entries: Vec<_> = (0..=10)
             .map(|b| match b {
-                0 => buffer(b, wgpu::BufferBindingType::Uniform),
+                0 | 10 => buffer(b, wgpu::BufferBindingType::Uniform),
                 1 | 8 => buffer(b, storage(true)),
                 _ => buffer(b, storage(false)),
             })
@@ -249,8 +288,14 @@ impl Gpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let look = d.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("look"),
+            size: std::mem::size_of::<LookUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let bufs = [
-            &params, &src, &scene, &logy, &small, &tmp, &stats, &ab, &lut, &out,
+            &params, &src, &scene, &logy, &small, &tmp, &stats, &ab, &lut, &out, &look,
         ];
         let entries: Vec<_> = bufs
             .iter()
@@ -276,6 +321,7 @@ impl Gpu {
             // Grey-world needs the pixels; compute it now so no CPU copy has to be kept.
             auto_wb: wb::multipliers(frame, &WhiteBalance::Auto, &frame.data),
             params,
+            look,
             lut,
             lut_state: Mutex::new(None),
             out,
@@ -362,6 +408,8 @@ impl Gpu {
         };
         self.queue
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));
+        let lu = LookUniform::new(&look::LookParams::new(&s));
+        self.queue.write_buffer(&f.look, 0, bytemuck::bytes_of(&lu));
 
         let mut enc = self.device.create_command_encoder(&Default::default());
         {

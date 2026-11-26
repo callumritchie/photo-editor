@@ -477,12 +477,13 @@ pub unsafe extern "C" fn pe_render(
 pub extern "C" fn pe_develop_schema_json() -> *mut c_char {
     let groups: Vec<_> = pe_develop::Group::ALL
         .iter()
-        .map(|g| serde_json::json!({ "id": g, "label": g.label(), "look": pe_develop::Group::LOOK.contains(g) }))
+        .map(|g| serde_json::json!({ "id": g, "label": g.label(), "look": g.is_look() }))
         .collect();
     json_out(&serde_json::json!({
-        "params": pe_develop::PARAMS,
-        "temperature": pe_develop::TEMPERATURE,
-        "tint": pe_develop::TINT,
+        "params": pe_develop::params(),
+        "choices": pe_develop::CHOICES,
+        "temperature": pe_develop::temperature_spec(),
+        "tint": pe_develop::tint_spec(),
         "groups": groups,
     }))
 }

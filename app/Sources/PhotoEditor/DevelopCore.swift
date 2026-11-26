@@ -10,42 +10,99 @@ struct WhiteBalance: Codable, Hashable {
     var tint: Double?
 }
 
-struct DevelopSettings: Codable, Hashable {
-    var processVersion = 1
-    var whiteBalance = WhiteBalance(mode: "asShot")
-    var exposure = 0.0
-    var contrast = 0.0
-    var highlights = 0.0
-    var shadows = 0.0
-    var whites = 0.0
-    var blacks = 0.0
-    var toneCurve: [[Double]] = []
-    var demosaic = "auto"
-    var applyOrientation = true
+/// Any JSON value, so settings can be edited by path without Swift knowing every field.
+enum JSONValue: Codable, Hashable {
+    case null, bool(Bool), number(Double), string(String), array([JSONValue]), object([String: JSONValue])
 
-    subscript(key: String) -> Double {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let b = try? c.decode(Bool.self) { self = .bool(b) }
+        else if let n = try? c.decode(Double.self) { self = .number(n) }
+        else if let s = try? c.decode(String.self) { self = .string(s) }
+        else if let a = try? c.decode([JSONValue].self) { self = .array(a) }
+        else { self = .object(try c.decode([String: JSONValue].self)) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let b): try c.encode(b)
+        case .number(let n): try c.encode(n)
+        case .string(let s): try c.encode(s)
+        case .array(let a): try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
+    }
+
+    /// Value at a dotted path such as `hsl.hue.0`.
+    subscript(path: ArraySlice<Substring>) -> JSONValue? {
         get {
-            switch key {
-            case "exposure": return exposure
-            case "contrast": return contrast
-            case "highlights": return highlights
-            case "shadows": return shadows
-            case "whites": return whites
-            case "blacks": return blacks
-            default: return 0
+            guard let head = path.first else { return self }
+            switch self {
+            case .object(let o): return o[String(head)]?[path.dropFirst()]
+            case .array(let a): guard let i = Int(head), a.indices.contains(i) else { return nil }
+                return a[i][path.dropFirst()]
+            default: return nil
             }
         }
         set {
-            switch key {
-            case "exposure": exposure = newValue
-            case "contrast": contrast = newValue
-            case "highlights": highlights = newValue
-            case "shadows": shadows = newValue
-            case "whites": whites = newValue
-            case "blacks": blacks = newValue
-            default: break
+            guard let head = path.first else { self = newValue ?? .null; return }
+            switch self {
+            case .object(var o):
+                var child = o[String(head)] ?? .object([:])
+                child[path.dropFirst()] = newValue
+                o[String(head)] = child
+                self = .object(o)
+            case .array(var a):
+                guard let i = Int(head), a.indices.contains(i) else { return }
+                a[i][path.dropFirst()] = newValue
+                self = .array(a)
+            default:
+                var fresh = JSONValue.object([:])
+                fresh[path] = newValue
+                self = fresh
             }
         }
+    }
+
+    var double: Double? { if case .number(let n) = self { return n }; return nil }
+    var stringValue: String? { if case .string(let s) = self { return s }; return nil }
+}
+
+/// Develop settings as the core's JSON. Sliders are read and written by dotted path (from the schema);
+/// missing values mean "default", which the core fills in.
+struct DevelopSettings: Codable, Hashable {
+    var value: JSONValue = .object([:])
+
+    init() {}
+    init(from decoder: Decoder) throws { value = try JSONValue(from: decoder) }
+    func encode(to encoder: Encoder) throws { try value.encode(to: encoder) }
+
+    private static func split(_ path: String) -> ArraySlice<Substring> { path.split(separator: ".")[...] }
+
+    func number(_ path: String) -> Double? { value[Self.split(path)]?.double }
+    mutating func setNumber(_ path: String, _ v: Double) { value[Self.split(path)] = .number(v) }
+    func string(_ path: String) -> String? { value[Self.split(path)]?.stringValue }
+    mutating func setString(_ path: String, _ v: String) { value[Self.split(path)] = .string(v) }
+
+    var whiteBalance: WhiteBalance {
+        get {
+            WhiteBalance(mode: string("whiteBalance.mode") ?? "asShot",
+                         temperature: number("whiteBalance.temperature"), tint: number("whiteBalance.tint"))
+        }
+        set {
+            var o: [String: JSONValue] = ["mode": .string(newValue.mode)]
+            if let t = newValue.temperature { o["temperature"] = .number(t) }
+            if let t = newValue.tint { o["tint"] = .number(t) }
+            value[["whiteBalance"][...]] = .object(o)
+        }
+    }
+
+    var treatment: String {
+        get { string("treatment") ?? "color" }
+        set { setString("treatment", newValue) }
     }
 
     var json: String { String(data: (try? JSONEncoder().encode(self)) ?? Data("{}".utf8), encoding: .utf8) ?? "{}" }
@@ -56,6 +113,10 @@ struct ParamSpec: Codable, Hashable {
     let key: String
     let label: String
     let group: String
+    var section: String = ""
+    var subsection: String? = nil
+    var when: String? = nil
+    var hue: Bool = false
     let min: Double
     let max: Double
     let step: Double
@@ -69,8 +130,16 @@ struct GroupSpec: Codable, Hashable {
     let look: Bool
 }
 
+struct ChoiceSpec: Codable, Hashable {
+    let key: String
+    let label: String
+    let section: String
+    let options: [[String]]
+}
+
 struct DevelopSchema: Codable {
     let params: [ParamSpec]
+    let choices: [ChoiceSpec]
     let temperature: ParamSpec
     let tint: ParamSpec
     let groups: [GroupSpec]

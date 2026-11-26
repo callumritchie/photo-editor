@@ -22,12 +22,18 @@ pub enum Group {
     Whites,
     Blacks,
     ToneCurve,
+    /// Vibrance and saturation.
+    Color,
+    ColorMixer,
+    /// Treatment (colour / black and white) and the black-and-white mix.
+    BlackWhite,
+    ColorGrading,
     /// Technical processing choices (demosaic method, orientation handling). Not part of "looks".
     Processing,
 }
 
 impl Group {
-    pub const ALL: [Group; 9] = [
+    pub const ALL: [Group; 13] = [
         Group::WhiteBalance,
         Group::Exposure,
         Group::Contrast,
@@ -36,20 +42,17 @@ impl Group {
         Group::Whites,
         Group::Blacks,
         Group::ToneCurve,
+        Group::Color,
+        Group::ColorMixer,
+        Group::BlackWhite,
+        Group::ColorGrading,
         Group::Processing,
     ];
 
-    /// Groups that make up a "look" (the default selection for presets and paste).
-    pub const LOOK: [Group; 8] = [
-        Group::WhiteBalance,
-        Group::Exposure,
-        Group::Contrast,
-        Group::Highlights,
-        Group::Shadows,
-        Group::Whites,
-        Group::Blacks,
-        Group::ToneCurve,
-    ];
+    /// Whether the group is part of a "look" (the default selection for presets and paste).
+    pub fn is_look(self) -> bool {
+        self != Group::Processing
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -61,112 +64,266 @@ impl Group {
             Group::Whites => "Whites",
             Group::Blacks => "Blacks",
             Group::ToneCurve => "Tone Curve",
+            Group::Color => "Vibrance & Saturation",
+            Group::ColorMixer => "Color Mixer",
+            Group::BlackWhite => "Black & White",
+            Group::ColorGrading => "Color Grading",
             Group::Processing => "Processing",
         }
+    }
+
+    /// Top-level settings keys (JSON names) owned by the group.
+    pub fn keys(self) -> &'static [&'static str] {
+        match self {
+            Group::WhiteBalance => &["whiteBalance"],
+            Group::Exposure => &["exposure"],
+            Group::Contrast => &["contrast"],
+            Group::Highlights => &["highlights"],
+            Group::Shadows => &["shadows"],
+            Group::Whites => &["whites"],
+            Group::Blacks => &["blacks"],
+            Group::ToneCurve => &["toneCurve"],
+            Group::Color => &["vibrance", "saturation"],
+            Group::ColorMixer => &["hsl"],
+            Group::BlackWhite => &["treatment", "bwMix"],
+            Group::ColorGrading => &["grading"],
+            Group::Processing => &["demosaic", "applyOrientation"],
+        }
+    }
+
+    /// The group owning a top-level settings key.
+    pub fn of_key(key: &str) -> Option<Group> {
+        Group::ALL.into_iter().find(|g| g.keys().contains(&key))
+    }
+}
+
+fn to_json(s: &Settings) -> serde_json::Map<String, serde_json::Value> {
+    match serde_json::to_value(s).expect("settings serialise") {
+        serde_json::Value::Object(m) => m,
+        _ => unreachable!("settings serialise to an object"),
     }
 }
 
 /// Copy the given groups from `src` into `dst`, leaving everything else in `dst` unchanged.
 pub fn apply_groups(dst: &mut Settings, src: &Settings, groups: &[Group]) {
+    let from = to_json(src);
+    let mut to = to_json(dst);
     for g in groups {
-        match g {
-            Group::WhiteBalance => dst.white_balance = src.white_balance.clone(),
-            Group::Exposure => dst.exposure = src.exposure,
-            Group::Contrast => dst.contrast = src.contrast,
-            Group::Highlights => dst.highlights = src.highlights,
-            Group::Shadows => dst.shadows = src.shadows,
-            Group::Whites => dst.whites = src.whites,
-            Group::Blacks => dst.blacks = src.blacks,
-            Group::ToneCurve => dst.tone_curve = src.tone_curve.clone(),
-            Group::Processing => {
-                dst.demosaic = src.demosaic;
-                dst.apply_orientation = src.apply_orientation;
+        for k in g.keys() {
+            if let Some(v) = from.get(*k) {
+                to.insert((*k).to_string(), v.clone());
             }
         }
     }
+    *dst = serde_json::from_value(serde_json::Value::Object(to)).expect("settings round-trip");
 }
 
 /// Description of one numeric slider.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParamSpec {
-    /// Field name in the settings JSON.
-    pub key: &'static str,
-    pub label: &'static str,
+    /// Dotted path into the settings JSON, e.g. `exposure` or `hsl.hue.0`.
+    pub key: String,
+    pub label: String,
     pub group: Group,
+    /// Panel section, and an optional tab within it (e.g. "Hue" in the colour mixer).
+    pub section: &'static str,
+    pub subsection: Option<&'static str>,
+    /// Only shown for this treatment ("color" or "monochrome").
+    pub when: Option<&'static str>,
     pub min: f32,
     pub max: f32,
     pub step: f32,
     pub default: f32,
     /// Decimal places for display.
     pub precision: u8,
+    /// Hue sliders show a colour ramp in the UI.
+    pub hue: bool,
 }
 
-const fn slider(key: &'static str, label: &'static str, group: Group) -> ParamSpec {
+impl ParamSpec {
+    /// Name used in history steps, e.g. "Exposure" or "Red Hue".
+    pub fn history_label(&self) -> String {
+        match self.subsection {
+            Some(sub) => format!("{} {}", self.label, sub),
+            None => self.label.clone(),
+        }
+    }
+}
+
+/// A setting chosen from a fixed list (shown as a picker).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChoiceSpec {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub section: &'static str,
+    pub options: &'static [(&'static str, &'static str)],
+}
+
+pub const CHOICES: [ChoiceSpec; 1] = [ChoiceSpec {
+    key: "treatment",
+    label: "Treatment",
+    section: "Tone",
+    options: &[("color", "Color"), ("monochrome", "Black & White")],
+}];
+
+/// Names of the colour-mixer hue bands, in settings order.
+pub const BAND_NAMES: [&str; pe_pipeline::HUE_BANDS] = [
+    "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
+];
+
+fn spec(
+    key: impl Into<String>,
+    label: impl Into<String>,
+    group: Group,
+    section: &'static str,
+) -> ParamSpec {
     ParamSpec {
-        key,
-        label,
+        key: key.into(),
+        label: label.into(),
         group,
+        section,
+        subsection: None,
+        when: None,
         min: -100.0,
         max: 100.0,
         step: 1.0,
         default: 0.0,
         precision: 0,
+        hue: false,
     }
+}
+
+fn build_params() -> Vec<ParamSpec> {
+    let mut v = vec![
+        ParamSpec {
+            min: -5.0,
+            max: 5.0,
+            step: 0.05,
+            precision: 2,
+            ..spec("exposure", "Exposure", Group::Exposure, "Tone")
+        },
+        spec("contrast", "Contrast", Group::Contrast, "Tone"),
+        spec("highlights", "Highlights", Group::Highlights, "Tone"),
+        spec("shadows", "Shadows", Group::Shadows, "Tone"),
+        spec("whites", "Whites", Group::Whites, "Tone"),
+        spec("blacks", "Blacks", Group::Blacks, "Tone"),
+        spec("vibrance", "Vibrance", Group::Color, "Presence"),
+        spec("saturation", "Saturation", Group::Color, "Presence"),
+    ];
+    for (field, sub) in [
+        ("hue", "Hue"),
+        ("saturation", "Saturation"),
+        ("luminance", "Luminance"),
+    ] {
+        for (i, name) in BAND_NAMES.iter().enumerate() {
+            v.push(ParamSpec {
+                subsection: Some(sub),
+                when: Some("color"),
+                ..spec(
+                    format!("hsl.{field}.{i}"),
+                    *name,
+                    Group::ColorMixer,
+                    "Color Mixer",
+                )
+            });
+        }
+    }
+    for (i, name) in BAND_NAMES.iter().enumerate() {
+        v.push(ParamSpec {
+            when: Some("monochrome"),
+            ..spec(format!("bwMix.{i}"), *name, Group::BlackWhite, "B&W Mix")
+        });
+    }
+    for (region, sub) in [
+        ("shadows", "Shadows"),
+        ("midtones", "Midtones"),
+        ("highlights", "Highlights"),
+        ("global", "Global"),
+    ] {
+        let g = |field: &str, label: &str| ParamSpec {
+            subsection: Some(sub),
+            ..spec(
+                format!("grading.{region}.{field}"),
+                label,
+                Group::ColorGrading,
+                "Color Grading",
+            )
+        };
+        v.push(ParamSpec {
+            min: 0.0,
+            max: 360.0,
+            hue: true,
+            ..g("hue", "Hue")
+        });
+        v.push(ParamSpec {
+            min: 0.0,
+            ..g("saturation", "Saturation")
+        });
+        v.push(g("luminance", "Luminance"));
+    }
+    v.push(ParamSpec {
+        min: 0.0,
+        default: 50.0,
+        ..spec(
+            "grading.blending",
+            "Blending",
+            Group::ColorGrading,
+            "Color Grading",
+        )
+    });
+    v.push(spec(
+        "grading.balance",
+        "Balance",
+        Group::ColorGrading,
+        "Color Grading",
+    ));
+    v
 }
 
 /// All numeric sliders, in panel order. White-balance temperature/tint are described separately
 /// because they only apply in custom mode.
-pub const PARAMS: [ParamSpec; 6] = [
+pub fn params() -> &'static [ParamSpec] {
+    static P: std::sync::LazyLock<Vec<ParamSpec>> = std::sync::LazyLock::new(build_params);
+    &P
+}
+
+pub fn temperature_spec() -> ParamSpec {
     ParamSpec {
-        key: "exposure",
-        label: "Exposure",
-        group: Group::Exposure,
-        min: -5.0,
-        max: 5.0,
-        step: 0.05,
-        default: 0.0,
-        precision: 2,
-    },
-    slider("contrast", "Contrast", Group::Contrast),
-    slider("highlights", "Highlights", Group::Highlights),
-    slider("shadows", "Shadows", Group::Shadows),
-    slider("whites", "Whites", Group::Whites),
-    slider("blacks", "Blacks", Group::Blacks),
-];
+        min: 2000.0,
+        max: 25000.0,
+        step: 50.0,
+        default: 5500.0,
+        ..spec(
+            "temperature",
+            "Temperature",
+            Group::WhiteBalance,
+            "White Balance",
+        )
+    }
+}
 
-pub const TEMPERATURE: ParamSpec = ParamSpec {
-    key: "temperature",
-    label: "Temperature",
-    group: Group::WhiteBalance,
-    min: 2000.0,
-    max: 25000.0,
-    step: 50.0,
-    default: 5500.0,
-    precision: 0,
-};
+pub fn tint_spec() -> ParamSpec {
+    ParamSpec {
+        min: -150.0,
+        max: 150.0,
+        ..spec("tint", "Tint", Group::WhiteBalance, "White Balance")
+    }
+}
 
-pub const TINT: ParamSpec = ParamSpec {
-    key: "tint",
-    label: "Tint",
-    group: Group::WhiteBalance,
-    min: -150.0,
-    max: 150.0,
-    step: 1.0,
-    default: 0.0,
-    precision: 0,
-};
+fn pointer(key: &str) -> String {
+    format!("/{}", key.replace('.', "/"))
+}
 
-fn value_of(s: &Settings, key: &str) -> Option<f32> {
-    Some(match key {
-        "exposure" => s.exposure,
-        "contrast" => s.contrast,
-        "highlights" => s.highlights,
-        "shadows" => s.shadows,
-        "whites" => s.whites,
-        "blacks" => s.blacks,
-        _ => return None,
-    })
+/// Value of a slider (by its dotted key) in settings already converted to JSON.
+fn value_in(json: &serde_json::Value, key: &str) -> Option<f32> {
+    json.pointer(&pointer(key))?.as_f64().map(|v| v as f32)
+}
+
+/// Value of a slider by its dotted key, e.g. `hsl.hue.0`.
+pub fn value_of(s: &Settings, key: &str) -> Option<f32> {
+    value_in(&serde_json::to_value(s).ok()?, key)
 }
 
 /// Canonical fingerprint of settings (hex, 32 chars). Equal settings always give equal digests;
@@ -198,58 +355,77 @@ pub fn canonical_json(s: &Settings) -> String {
             other => other,
         }
     }
-    norm(serde_json::to_value(s).expect("settings serialise")).to_string()
+    // Values at their defaults are left out, so adding a new setting does not change the digest of
+    // existing edits (and does not invalidate their cached previews).
+    let defaults = to_json(&Settings::default());
+    let mut m = to_json(s);
+    m.retain(|k, v| {
+        k == "processVersion" || defaults.get(k).map(|d| norm(d.clone())) != Some(norm(v.clone()))
+    });
+    norm(serde_json::Value::Object(m)).to_string()
 }
 
 /// Human-readable label for a history step going from `before` to `after`, e.g. "Exposure +0.50",
-/// "White Balance: 5600 K", or "Contrast, Shadows" when several sliders changed. `None` if nothing changed.
+/// "White Balance: 5600 K", or "Contrast, Shadows" when several things changed. `None` if nothing changed.
 pub fn describe_change(before: &Settings, after: &Settings) -> Option<String> {
-    let mut parts = Vec::new();
-    for p in PARAMS {
-        let (a, b) = (value_of(before, p.key)?, value_of(after, p.key)?);
+    let (ja, jb) = (
+        serde_json::to_value(before).ok()?,
+        serde_json::to_value(after).ok()?,
+    );
+    let mut sliders = Vec::new();
+    let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for p in params() {
+        covered.insert(p.key.split('.').next().unwrap_or(""));
+        let (Some(a), Some(b)) = (value_in(&ja, &p.key), value_in(&jb, &p.key)) else {
+            continue;
+        };
         if (a - b).abs() > 1e-6 {
-            parts.push((p.label, b, b - a, p.precision));
+            sliders.push((p.history_label(), b, b - a, p.precision));
         }
     }
-    let wb_changed = before.white_balance != after.white_balance;
-    let curve_changed = before.tone_curve != after.tone_curve;
-    let other_changed =
-        before.demosaic != after.demosaic || before.apply_orientation != after.apply_orientation;
-    let changed =
-        parts.len() + wb_changed as usize + curve_changed as usize + other_changed as usize;
-    if changed == 0 {
-        return None;
-    }
-    if changed == 1 {
-        if let Some((label, value, delta, prec)) = parts.first() {
-            let p = *prec as usize;
-            return Some(format!("{label} {value:+.p$} ({delta:+.p$})"));
-        }
-        if wb_changed {
-            return Some(match &after.white_balance {
-                WhiteBalance::AsShot => "White Balance: As Shot".into(),
-                WhiteBalance::Auto => "White Balance: Auto".into(),
-                WhiteBalance::Custom { temperature, tint } => {
-                    format!("White Balance: {temperature:.0} K, tint {tint:+.0}")
-                }
+    // Other settings that changed, named by their group (in group order, without repeats).
+    let mut others: Vec<String> = Vec::new();
+    let (ma, mb) = (to_json(before), to_json(after));
+    for g in Group::ALL {
+        let changed = g
+            .keys()
+            .iter()
+            .any(|k| !covered.contains(k) && ma.get(*k) != mb.get(*k));
+        if changed {
+            others.push(match (g, after) {
+                (Group::WhiteBalance, s) => match &s.white_balance {
+                    WhiteBalance::AsShot => "White Balance: As Shot".into(),
+                    WhiteBalance::Auto => "White Balance: Auto".into(),
+                    WhiteBalance::Custom { temperature, tint } => {
+                        format!("White Balance: {temperature:.0} K, tint {tint:+.0}")
+                    }
+                },
+                (Group::BlackWhite, s) if s.treatment != before.treatment => match s.treatment {
+                    pe_pipeline::Treatment::Monochrome => "Black & White".into(),
+                    pe_pipeline::Treatment::Color => "Color".into(),
+                },
+                (g, _) => g.label().into(),
             });
         }
-        if curve_changed {
-            return Some("Tone Curve".into());
+    }
+    match (sliders.len(), others.len()) {
+        (0, 0) => None,
+        (1, 0) => {
+            let (label, value, delta, prec) = &sliders[0];
+            let p = *prec as usize;
+            Some(format!("{label} {value:+.p$} ({delta:+.p$})"))
         }
-        return Some("Processing".into());
+        (0, 1) => Some(others.remove(0)),
+        _ => {
+            let mut names: Vec<String> = Vec::new();
+            for o in others {
+                // Multi-change labels use the short name ("White Balance", not its value).
+                names.push(o.split(':').next().unwrap_or(&o).to_string());
+            }
+            names.extend(sliders.into_iter().map(|s| s.0));
+            Some(names.join(", "))
+        }
     }
-    let mut names: Vec<&str> = parts.iter().map(|p| p.0).collect();
-    if wb_changed {
-        names.insert(0, "White Balance");
-    }
-    if curve_changed {
-        names.push("Tone Curve");
-    }
-    if other_changed {
-        names.push("Processing");
-    }
-    Some(names.join(", "))
 }
 
 #[cfg(test)]
@@ -296,6 +472,14 @@ mod tests {
         assert_eq!(describe_change(&a, &b).unwrap(), "Exposure +0.50 (+0.50)");
         b.shadows = 30.0;
         assert_eq!(describe_change(&a, &b).unwrap(), "Exposure, Shadows");
+        let mut d = a.clone();
+        d.hsl.hue[0] = 20.0;
+        assert_eq!(describe_change(&a, &d).unwrap(), "Red Hue +20 (+20)");
+        d.treatment = pe_pipeline::Treatment::Monochrome;
+        assert_eq!(describe_change(&a, &d).unwrap(), "Black & White, Red Hue");
+        let mut e = a.clone();
+        e.tone_curve = vec![[0.0, 10.0], [255.0, 255.0]];
+        assert_eq!(describe_change(&a, &e).unwrap(), "Tone Curve");
         let mut c = a.clone();
         c.white_balance = WhiteBalance::Custom {
             temperature: 5600.0,
@@ -310,14 +494,56 @@ mod tests {
     #[test]
     fn every_param_maps_to_a_settings_field() {
         let s = Settings::default();
-        for p in PARAMS {
-            assert_eq!(value_of(&s, p.key), Some(p.default), "{}", p.key);
-            let json = serde_json::to_value(&s).unwrap();
-            assert!(
-                json.get(p.key).is_some(),
-                "{} missing from settings JSON",
+        for p in params() {
+            assert_eq!(value_of(&s, &p.key), Some(p.default), "{}", p.key);
+            assert_eq!(
+                Group::of_key(p.key.split('.').next().unwrap()),
+                Some(p.group),
+                "{}",
                 p.key
             );
         }
+        assert_eq!(
+            params()
+                .iter()
+                .filter(|p| p.section == "Color Mixer")
+                .count(),
+            24
+        );
+    }
+
+    #[test]
+    fn every_settings_key_belongs_to_exactly_one_group() {
+        for k in to_json(&Settings::default()).keys() {
+            if k == "processVersion" {
+                continue;
+            }
+            let n = Group::ALL
+                .iter()
+                .filter(|g| g.keys().contains(&k.as_str()))
+                .count();
+            assert_eq!(n, 1, "{k} is in {n} groups");
+        }
+    }
+
+    #[test]
+    fn digest_ignores_defaults_and_groups_copy_nested_settings() {
+        // Default-valued fields are omitted from the canonical form.
+        assert_eq!(
+            canonical_json(&Settings::default()),
+            r#"{"processVersion":1}"#
+        );
+        let mut src = Settings::default();
+        src.hsl.saturation[5] = -40.0;
+        src.grading.shadows.hue = 220.0;
+        let mut dst = Settings::default();
+        apply_groups(&mut dst, &src, &[Group::ColorMixer]);
+        assert_eq!(dst.hsl, src.hsl);
+        assert_eq!(
+            dst.grading,
+            Settings::default().grading,
+            "grading not selected"
+        );
+        assert_ne!(digest(&dst), digest(&Settings::default()));
     }
 }

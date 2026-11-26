@@ -1,6 +1,6 @@
 # Render pipeline
 
-The CPU reference pipeline lives in `crates/pipeline`. A GPU version (milestone M4) will be verified against it.
+The CPU reference pipeline lives in `crates/pipeline`; the GPU version in `crates/gpu` is tested against it (see below).
 All processing is 32-bit float. Values stay scene-linear and unclipped until the display transform.
 
 | # | Stage | Module | Method |
@@ -14,6 +14,7 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | 7 | Shadows / Highlights | `tone.rs`, `filter.rs` | log2 luminance split into base + detail with a fast guided filter (He & Sun 2015) at ~2% radius. The base is shifted by up to ±1.5 EV with smooth masks for dark/bright regions and applied as an RGB gain, so local detail is preserved and halos are limited |
 | 8 | Contrast | `tone.rs` | Power curve on luminance pivoting at scene mid-grey (0.18), applied as RGB gain |
 | 9 | Display transform | `tone.rs` | Narkowicz (2015) ACES-fitted curve on the max(R,G,B) norm, with RGB ratios preserved (hue-stable), normalised so a scene white point (default 16, moved by **Whites**) maps to 1.0. Colours near white desaturate to roll off. **Blacks** offsets the black level |
+| 9b | Colour | `look.rs` | In OKLab/OKLCh (Ottosson 2020) on display-linear values. **Colour mixer:** eight hue bands with smooth weights; hue ±30°, chroma gain, lightness ±0.6 stop, fading out towards neutrals. **Saturation:** uniform chroma gain. **Vibrance:** chroma gain weighted to muted colours, halved on skin hues. **Black & white:** OKLab lightness, ±0.8 stop per hue band. **Colour grading:** shadow/midtone/highlight weights from lightness (balance moves the split, blending widens the transitions), each adding an a/b tint and a lightness shift |
 | 10 | Output | `lib.rs`, `tone.rs` | Rec.2020 → linear sRGB; out-of-gamut colours desaturated towards their luminance; sRGB transfer function |
 | 11 | Point curve | `tone.rs` | Monotone cubic (Fritsch & Carlson 1980) through user points on encoded 0–255 values |
 | 12 | Orientation | `orient.rs` | EXIF orientation codes 1–8 (rotate/flip) |
@@ -26,6 +27,11 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | `exposure` | −5…5 EV | 0 |
 | `contrast`, `highlights`, `shadows`, `whites`, `blacks` | −100…100 | 0 |
 | `toneCurve` | list of `[x, y]` on 0…255 | identity |
+| `vibrance`, `saturation` | −100…100 | 0 |
+| `hsl` | `{"hue":[8], "saturation":[8], "luminance":[8]}`, each −100…100, bands red, orange, yellow, green, aqua, blue, purple, magenta | 0 |
+| `treatment` | `color` / `monochrome` | color |
+| `bwMix` | 8 values, −100…100 | 0 |
+| `grading` | `shadows`/`midtones`/`highlights`/`global`: `{"hue":0…360, "saturation":0…100, "luminance":−100…100}`; `blending` 0…100; `balance` −100…100 | blending 50 |
 | `demosaic` | `auto` / `fast` | auto |
 | `applyOrientation` | bool | true |
 

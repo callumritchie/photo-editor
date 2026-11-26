@@ -106,8 +106,20 @@ struct DevelopPanel: View {
     @EnvironmentObject var app: AppState
     @ObservedObject var model: DevelopModel
     @State private var showSavePreset = false
+    // Development aid for UI snapshots: PE_PANEL_SECTIONS="Color Mixer,Color Grading".
+    @State private var expanded: Set<String> = Set(
+        ProcessInfo.processInfo.environment["PE_PANEL_SECTIONS"]?.split(separator: ",").map(String.init)
+            ?? ["Tone", "Presence"])
+    @State private var tabs: [String: String] = [:]
 
     private let schema = DevelopSchema.shared
+
+    /// Section names in schema order.
+    private var sectionNames: [String] {
+        var seen: [String] = []
+        for p in schema.params where !seen.contains(p.section) { seen.append(p.section) }
+        return seen
+    }
 
     var body: some View {
         ScrollView {
@@ -118,9 +130,10 @@ struct DevelopPanel: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 section("White Balance") { whiteBalance }
-                section("Tone") {
-                    ForEach(schema.params, id: \.key) { p in
-                        ParamSlider(spec: p, value: binding(p.key), onCommit: { model.commit() })
+                ForEach(sectionNames, id: \.self) { name in
+                    let params = schema.params.filter { $0.section == name }
+                    if params.allSatisfy({ $0.when == nil || $0.when == model.settings.treatment }) {
+                        collapsible(name) { paramSection(name, params) }
                     }
                 }
                 section("Presets") { presets }
@@ -208,6 +221,45 @@ struct DevelopPanel: View {
         }
     }
 
+    @ViewBuilder private func paramSection(_ name: String, _ params: [ParamSpec]) -> some View {
+        ForEach(schema.choices.filter { $0.section == name }, id: \.key) { c in
+            Picker(c.label, selection: Binding(
+                get: { model.settings.string(c.key) ?? c.options.first?.first ?? "" },
+                set: { v in model.settings.setString(c.key, v); model.requestRender(); model.commit() })) {
+                ForEach(c.options, id: \.self) { o in Text(o.last ?? "").tag(o.first ?? "") }
+            }
+            .pickerStyle(.segmented)
+        }
+        let subs = params.compactMap(\.subsection).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        if !subs.isEmpty {
+            let current = tabs[name] ?? subs[0]
+            Picker(name, selection: Binding(get: { current }, set: { tabs[name] = $0 })) {
+                ForEach(subs, id: \.self) { Text($0).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            ForEach(params.filter { $0.subsection == current }, id: \.key) { p in
+                ParamSlider(spec: p, value: binding(p), onCommit: { model.commit() })
+            }
+        }
+        ForEach(params.filter { $0.subsection == nil }, id: \.key) { p in
+            ParamSlider(spec: p, value: binding(p), onCommit: { model.commit() })
+        }
+    }
+
+    private func collapsible<C: View>(_ title: String, @ViewBuilder content: @escaping () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            DisclosureGroup(isExpanded: Binding(
+                get: { expanded.contains(title) },
+                set: { if $0 { expanded.insert(title) } else { expanded.remove(title) } })) {
+                VStack(alignment: .leading, spacing: 8) { content() }.padding(.top, 6)
+            } label: {
+                Text(title).font(.headline)
+            }
+            Divider()
+        }
+    }
+
     private func section<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.headline)
@@ -216,8 +268,9 @@ struct DevelopPanel: View {
         }
     }
 
-    private func binding(_ key: String) -> Binding<Double> {
-        Binding(get: { model.settings[key] }, set: { model.settings[key] = $0; model.requestRender() })
+    private func binding(_ p: ParamSpec) -> Binding<Double> {
+        Binding(get: { model.settings.number(p.key) ?? p.default },
+                set: { model.settings.setNumber(p.key, $0); model.requestRender() })
     }
 
     private func wbBinding(_ field: WritableKeyPath<WhiteBalance, Double?>, fallback: Double) -> Binding<Double> {
@@ -242,7 +295,9 @@ struct ParamSlider: View {
     let onCommit: () -> Void
 
     private var formatted: String {
-        spec.key == "temperature" ? "\(Int(value.rounded())) K" : String(format: "%+.\(spec.precision)f", value)
+        if spec.key == "temperature" { return "\(Int(value.rounded())) K" }
+        if spec.hue { return "\(Int(value.rounded()))°" }
+        return String(format: spec.min >= 0 ? "%.\(spec.precision)f" : "%+.\(spec.precision)f", value)
     }
 
     var body: some View {
@@ -252,10 +307,15 @@ struct ParamSlider: View {
                     .onTapGesture(count: 2) { value = spec.default; onCommit() }
                     .help("Double-click to reset")
                 Spacer()
+                if spec.hue {
+                    Circle().fill(Color(hue: value / 360, saturation: 0.75, brightness: 0.9)).frame(width: 10, height: 10)
+                }
                 Text(formatted).monospacedDigit().foregroundStyle(.secondary)
             }
             .font(.callout)
-            Slider(value: $value, in: spec.min...spec.max, step: spec.step) { editing in
+            // Rounded in the binding: a stepped Slider draws one tick mark per step.
+            Slider(value: Binding(get: { value }, set: { value = ($0 / spec.step).rounded() * spec.step }),
+                   in: spec.min...spec.max) { editing in
                 if !editing { onCommit() }
             }
             .controlSize(.small)

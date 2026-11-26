@@ -30,6 +30,65 @@ pub enum Demosaic {
     Fast,
 }
 
+/// Colour or black-and-white rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Treatment {
+    #[default]
+    Color,
+    Monochrome,
+}
+
+/// Number of hue bands in the colour mixer and black-and-white mix, in order: red, orange, yellow,
+/// green, aqua, blue, purple, magenta.
+pub const HUE_BANDS: usize = 8;
+
+/// Colour mixer: per hue band, -100..100 each.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Hsl {
+    pub hue: [f32; HUE_BANDS],
+    pub saturation: [f32; HUE_BANDS],
+    pub luminance: [f32; HUE_BANDS],
+}
+
+/// One colour-grading region: a tint (hue in degrees 0..360, saturation 0..100) and a luminance
+/// shift (-100..100).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GradeWheel {
+    pub hue: f32,
+    pub saturation: f32,
+    pub luminance: f32,
+}
+
+/// Colour grading by tonal region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Grading {
+    pub shadows: GradeWheel,
+    pub midtones: GradeWheel,
+    pub highlights: GradeWheel,
+    pub global: GradeWheel,
+    /// Overlap between regions, 0..100 (50 = default).
+    pub blending: f32,
+    /// Moves the shadow/highlight split: - favours shadows, + highlights. -100..100.
+    pub balance: f32,
+}
+
+impl Default for Grading {
+    fn default() -> Self {
+        Self {
+            shadows: GradeWheel::default(),
+            midtones: GradeWheel::default(),
+            highlights: GradeWheel::default(),
+            global: GradeWheel::default(),
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
+}
+
 /// Current rendering algorithm generation.
 pub const PROCESS_VERSION: u32 = 1;
 
@@ -55,6 +114,15 @@ pub struct Settings {
     pub blacks: f32,
     /// Point curve on display-encoded values, as (input, output) pairs on 0..255. Empty = identity.
     pub tone_curve: Vec<[f32; 2]>,
+    /// Boost (+) or mute (-) colour, mostly in less saturated areas and sparing skin. -100..100.
+    pub vibrance: f32,
+    /// Colour intensity of everything equally. -100..100 (-100 = greyscale).
+    pub saturation: f32,
+    pub hsl: Hsl,
+    pub treatment: Treatment,
+    /// Black-and-white mix: how light each hue band becomes in monochrome. -100..100 each.
+    pub bw_mix: [f32; HUE_BANDS],
+    pub grading: Grading,
     pub demosaic: Demosaic,
     /// Apply the camera orientation (rotate/flip) to the output.
     pub apply_orientation: bool,
@@ -72,6 +140,12 @@ impl Default for Settings {
             whites: 0.0,
             blacks: 0.0,
             tone_curve: Vec::new(),
+            vibrance: 0.0,
+            saturation: 0.0,
+            hsl: Hsl::default(),
+            treatment: Treatment::Color,
+            bw_mix: [0.0; HUE_BANDS],
+            grading: Grading::default(),
             demosaic: Demosaic::Auto,
             apply_orientation: true,
         }
@@ -82,14 +156,34 @@ impl Settings {
     /// Clamp all values into their documented ranges.
     pub fn clamped(mut self) -> Self {
         self.exposure = self.exposure.clamp(-5.0, 5.0);
-        for v in [
+        let g = &mut self.grading;
+        let mut pm100: Vec<&mut f32> = vec![
             &mut self.contrast,
             &mut self.highlights,
             &mut self.shadows,
             &mut self.whites,
             &mut self.blacks,
-        ] {
+            &mut self.vibrance,
+            &mut self.saturation,
+            &mut g.balance,
+        ];
+        pm100.extend(self.hsl.hue.iter_mut());
+        pm100.extend(self.hsl.saturation.iter_mut());
+        pm100.extend(self.hsl.luminance.iter_mut());
+        pm100.extend(self.bw_mix.iter_mut());
+        for v in pm100 {
             *v = v.clamp(-100.0, 100.0);
+        }
+        g.blending = g.blending.clamp(0.0, 100.0);
+        for w in [
+            &mut g.shadows,
+            &mut g.midtones,
+            &mut g.highlights,
+            &mut g.global,
+        ] {
+            w.hue = w.hue.rem_euclid(360.0);
+            w.saturation = w.saturation.clamp(0.0, 100.0);
+            w.luminance = w.luminance.clamp(-100.0, 100.0);
         }
         if let WhiteBalance::Custom { temperature, tint } = &mut self.white_balance {
             *temperature = temperature.clamp(pe_colour::cct::T_MIN, pe_colour::cct::T_MAX);

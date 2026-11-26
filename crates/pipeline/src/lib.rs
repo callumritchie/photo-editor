@@ -5,7 +5,8 @@
 //! 2. white balance + highlight reconstruction (camera space)
 //! 3. camera -> linear Rec.2020 working space; exposure
 //! 4. local tone (shadows / highlights)
-//! 5. contrast, filmic display transform (whites), black level
+//! 5. contrast, filmic display transform (whites), black level; colour (mixer, vibrance/saturation,
+//!    black and white, grading)
 //! 6. Rec.2020 -> linear sRGB, gamut mapping, sRGB encoding
 //! 7. point curve (encoded values), orientation
 //!
@@ -13,12 +14,16 @@
 
 pub mod demosaic;
 pub mod filter;
+pub mod look;
 pub mod orient;
 pub mod settings;
 pub mod tone;
 pub mod wb;
 
-pub use settings::{Demosaic, Settings, WhiteBalance, PROCESS_VERSION};
+pub use settings::{
+    Demosaic, GradeWheel, Grading, Hsl, Settings, Treatment, WhiteBalance, HUE_BANDS,
+    PROCESS_VERSION,
+};
 
 pub use pe_colour::ColorSpace;
 use pe_colour::{apply, Mat3, REC2020_LUMA, REC2020_TO_XYZ_D65};
@@ -200,10 +205,11 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
     }
 
     let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks);
+    let look_params = look::LookParams::new(&settings);
     // The point curve is defined on sRGB-encoded display values, independent of the output space.
     let curve = tone::CurveLut::new(&settings.tone_curve);
     data.par_chunks_mut(3).for_each(|px| {
-        let mut d = params.apply([px[0], px[1], px[2]], REC2020_LUMA);
+        let mut d = look_params.apply(params.apply([px[0], px[1], px[2]], REC2020_LUMA));
         if let Some(c) = &curve {
             for v in &mut d {
                 *v = pe_colour::srgb_decode(c.apply(pe_colour::srgb_encode(v.clamp(0.0, 1.0))));

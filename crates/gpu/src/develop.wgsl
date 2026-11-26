@@ -29,6 +29,21 @@ struct Params {
 @group(0) @binding(8) var<storage, read> lut: array<f32>;
 @group(0) @binding(9) var<storage, read_write> out_rgba: array<u32>;
 
+// Colour stage constants (pe_pipeline::look::LookParams).
+struct Look {
+    flags: vec4<f32>,                  // enabled, monochrome, saturation gain, vibrance
+    lms: array<vec4<f32>, 3>,          // linear Rec.2020 -> LMS rows
+    rgb: array<vec4<f32>, 3>,          // LMS -> linear Rec.2020 rows
+    centres: array<vec4<f32>, 2>,      // hue band centres (degrees)
+    band_hue: array<vec4<f32>, 2>,
+    band_sat: array<vec4<f32>, 2>,
+    band_lum: array<vec4<f32>, 2>,
+    band_bw: array<vec4<f32>, 2>,
+    grade: array<vec4<f32>, 4>,        // (a, b, lightness) for shadows, midtones, highlights, global
+    shape: vec4<f32>,                  // transition half-width, balance
+};
+@group(0) @binding(10) var<uniform> L: Look;
+
 const CLIP: f32 = 0.985;
 const MID_GREY: f32 = 0.18;
 const REC2020_LUMA: vec3<f32> = vec3<f32>(0.2627, 0.677998, 0.059302);
@@ -234,6 +249,80 @@ fn gamut_map(px: vec3<f32>) -> vec3<f32> {
     return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// --- Colour stage (look.rs) ------------------------------------------------------------------
+
+fn cbrt_(x: f32) -> f32 { return sign(x) * pow(abs(x), 1.0 / 3.0); }
+
+fn at8(a: array<vec4<f32>, 2>, i: u32) -> f32 { return a[i / 4u][i % 4u]; }
+
+const LMS_TO_LAB = mat3x3<f32>(   // columns
+    vec3<f32>(0.21045426, 1.9779985, 0.025904037),
+    vec3<f32>(0.7936178, -2.4285922, 0.78277177),
+    vec3<f32>(-0.004072047, 0.4505937, -0.80867577));
+const LAB_TO_LMS = mat3x3<f32>(
+    vec3<f32>(1.0, 1.0, 1.0),
+    vec3<f32>(0.39633778, -0.105561346, -0.08948418),
+    vec3<f32>(0.21580376, -0.06385417, -1.2914855));
+
+fn look(d: vec3<f32>) -> vec3<f32> {
+    if (L.flags.x < 0.5) { return d; }
+    let lms = vec3<f32>(dot(L.lms[0].xyz, d), dot(L.lms[1].xyz, d), dot(L.lms[2].xyz, d));
+    let lab = LMS_TO_LAB * vec3<f32>(cbrt_(lms.x), cbrt_(lms.y), cbrt_(lms.z));
+    var l = lab.x;
+    let c0 = sqrt(lab.y * lab.y + lab.z * lab.z);
+    var h = degrees(atan2(lab.z, lab.y));
+    if (h < 0.0) { h += 360.0; }
+
+    // Bands either side of the hue.
+    var i = 7u;
+    for (var k = 0u; k < 8u; k++) {
+        if (h >= at8(L.centres, k)) { i = k; }
+    }
+    let j = (i + 1u) % 8u;
+    let start = at8(L.centres, i);
+    var span = at8(L.centres, j) - start;
+    var dh = h - start;
+    if (span <= 0.0) { span += 360.0; }
+    if (dh < 0.0) { dh += 360.0; }
+    let t = smoothstep_(0.0, 1.0, dh / span);
+    let chroma_w = smoothstep_(0.0, 0.06, c0);
+
+    h += at8(L.band_hue, i) * (1.0 - t) + at8(L.band_hue, j) * t;
+    var c = c0 * max(1.0 + at8(L.band_sat, i) * (1.0 - t) + at8(L.band_sat, j) * t, 0.0);
+    l *= exp2((at8(L.band_lum, i) * (1.0 - t) + at8(L.band_lum, j) * t) * chroma_w);
+
+    c *= L.flags.z;
+    let vib = L.flags.w;
+    if (vib != 0.0) {
+        let low = 1.0 - smoothstep_(0.0, 0.2, c);
+        let skin = 1.0 - 0.5 * (1.0 - smoothstep_(0.0, 30.0, abs(h - 60.0)));
+        var v = vib;
+        if (vib > 0.0) { v = vib * skin; }
+        c *= max(1.0 + v * low, 0.0);
+    }
+    if (L.flags.y > 0.5) {
+        l *= exp2((at8(L.band_bw, i) * (1.0 - t) + at8(L.band_bw, j) * t) * chroma_w);
+        c = 0.0;
+    }
+    let hr = radians(h);
+    var a2 = c * cos(hr);
+    var b2 = c * sin(hr);
+
+    let wd = L.shape.x;
+    let bal = L.shape.y;
+    let ws = 1.0 - smoothstep_(0.33 + bal - wd, 0.33 + bal + wd, l);
+    let wh = smoothstep_(0.66 + bal - wd, 0.66 + bal + wd, l);
+    let wm = max(1.0 - ws - wh, 0.0);
+    let g = L.grade[0] * ws + L.grade[1] * wm + L.grade[2] * wh + L.grade[3];
+    a2 += g.x;
+    b2 += g.y;
+    l = max(l + g.z, 0.0);
+
+    let m = LAB_TO_LMS * vec3<f32>(l, a2, b2);
+    let lms2 = m * m * m;
+    return vec3<f32>(dot(L.rgb[0].xyz, lms2), dot(L.rgb[1].xyz, lms2), dot(L.rgb[2].xyz, lms2));
+}
+
 // Source coordinates for output pixel (dx, dy) under EXIF orientation `code` (as orient::apply).
 fn oriented_source(dx: u32, dy: u32, code: u32) -> vec2<u32> {
     let w = P.dims.x;
@@ -269,7 +358,7 @@ fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
         c *= exp2(P.local.x * w_shadow + P.local.y * w_high);
     }
 
-    var d = tone(c);
+    var d = look(tone(c));
     if (P.dims2.w != 0u) {
         for (var k = 0; k < 3; k++) {
             d[k] = srgb_decode(curve(srgb_encode(clamp(d[k], 0.0, 1.0))));
