@@ -1,6 +1,7 @@
 // GPU demosaic, mirroring pe_pipeline::demosaic::high_quality: green by Hamilton-Adams (2x2 Bayer,
-// mirrored borders) or neighbourhood average (other CFAs), red/blue as colour differences, then a
-// 3x3 median of R-G and B-G (false-colour suppression).
+// mirrored borders) or directional interpolation (other CFAs, X-Trans), red/blue as colour
+// differences (weighted by green similarity for other CFAs), then a 3x3 median of R-G and B-G
+// (false-colour suppression).
 
 struct D {
     w: u32,
@@ -8,7 +9,13 @@ struct D {
     cfa_w: u32,
     cfa_h: u32,
     pattern: array<vec4<u32>, 9>,   // 36 colour indices (0 R, 1 G, 2 B), row-major over the CFA tile
+    dirs: array<vec4<u32>, 144>,    // per tile position and direction: steps to green +/-, own colour +/-
 };
+
+// pe_pipeline::demosaic constants.
+const DIR_EPS: f32 = 1.0e-2;
+const DIFF_EPS: f32 = 2.0e-3;
+const DIRS = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(0, 1), vec2<i32>(1, 1), vec2<i32>(1, -1));
 
 @group(0) @binding(0) var<uniform> U: D;
 @group(0) @binding(1) var<storage, read> mosaic: array<f32>;
@@ -56,6 +63,76 @@ fn window_mean(x: u32, y: u32, color: u32, r: u32, use_green: bool) -> vec2<f32>
     return vec2<f32>(sum / f32(n), 1.0);
 }
 
+fn inside(p: vec2<i32>) -> bool {
+    return p.x >= 0 && p.y >= 0 && p.x < i32(U.w) && p.y < i32(U.h);
+}
+
+fn mos(p: vec2<i32>) -> f32 { return mosaic[u32(p.y) * U.w + u32(p.x)]; }
+
+// Directional green at a non-green site (demosaic.rs green_at). Returns (green, found).
+fn green_directional(x: u32, y: u32, c: f32) -> vec2<f32> {
+    let k = (y % U.cfa_h) * U.cfa_w + (x % U.cfa_w);
+    let p0 = vec2<i32>(i32(x), i32(y));
+    var sum = 0.0;
+    var wsum = 0.0;
+    var lo = 3.0e38;
+    var hi = -3.0e38;
+    for (var d = 0u; d < 4u; d++) {
+        let t = U.dirs[k * 4u + d];
+        if (t.x == 0u || t.y == 0u) { continue; }
+        let dir = DIRS[d];
+        let pp = p0 + dir * i32(t.x);
+        let pm = p0 - dir * i32(t.y);
+        if (!inside(pp) || !inside(pm)) { continue; }
+        let gp = mos(pp);
+        let gm = mos(pm);
+        let af = f32(t.x);
+        let bf = f32(t.y);
+        let lin_g = (gp * bf + gm * af) / (af + bf);
+        var corr = 0.0;
+        if (t.z > 0u && t.w > 0u) {
+            let cpp = p0 + dir * i32(t.z);
+            let cpm = p0 - dir * i32(t.w);
+            if (inside(cpp) && inside(cpm)) {
+                let apf = f32(t.z);
+                let amf = f32(t.w);
+                corr = c - (mos(cpp) * amf + mos(cpm) * apf) / (apf + amf);
+            }
+        }
+        let est = lin_g + 0.5 * corr;
+        let grad = abs(gp - gm) + abs(corr);
+        let wt = 1.0 / (grad + DIR_EPS);
+        sum += wt * est;
+        wsum += wt;
+        lo = min(lo, min(gp, gm));
+        hi = max(hi, max(gp, gm));
+    }
+    if (wsum <= 0.0) { return vec2<f32>(0.0, 0.0); }
+    return vec2<f32>(clamp(sum / wsum, lo, hi), 1.0);
+}
+
+// Like window_mean of (mosaic - green), weighting sites by green similarity (demosaic.rs diff_weighted).
+fn diff_weighted(x: u32, y: u32, color: u32, r: u32, g0: f32) -> vec2<f32> {
+    let x0 = select(x - r, 0u, x < r);
+    let y0 = select(y - r, 0u, y < r);
+    let x1 = min(x + r, U.w - 1u);
+    let y1 = min(y + r, U.h - 1u);
+    var sum = 0.0;
+    var wsum = 0.0;
+    for (var yy = y0; yy <= y1; yy++) {
+        for (var xx = x0; xx <= x1; xx++) {
+            if (color_at(yy, xx) == color) {
+                let i = yy * U.w + xx;
+                let wt = 1.0 / (abs(green[i] - g0) + DIFF_EPS);
+                sum += wt * (mosaic[i] - green[i]);
+                wsum += wt;
+            }
+        }
+    }
+    if (wsum <= 0.0) { return vec2<f32>(0.0, 0.0); }
+    return vec2<f32>(sum / wsum, 1.0);
+}
+
 @compute @workgroup_size(256)
 fn green_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = idx(gid, nwg);
@@ -84,7 +161,8 @@ fn green_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
         let hi = max(max(gl, gr), max(gu, gd));
         green[i] = clamp(est, lo, hi);
     } else {
-        var m = window_mean(x, y, 1u, 1u, false);
+        var m = green_directional(x, y, c);
+        if (m.y == 0.0) { m = window_mean(x, y, 1u, 1u, false); }
         if (m.y == 0.0) { m = window_mean(x, y, 1u, 2u, false); }
         green[i] = m.x;
     }
@@ -105,8 +183,14 @@ fn colour_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workg
         if (c == own) {
             v = mosaic[i];
         } else {
-            var m = window_mean(x, y, c, 1u, true);
-            if (m.y == 0.0) { m = window_mean(x, y, c, 2u, true); }
+            var m: vec2<f32>;
+            if (U.cfa_w == 2u && U.cfa_h == 2u) {
+                m = window_mean(x, y, c, 1u, true);
+                if (m.y == 0.0) { m = window_mean(x, y, c, 2u, true); }
+            } else {
+                m = diff_weighted(x, y, c, 1u, g);
+                if (m.y == 0.0) { m = diff_weighted(x, y, c, 2u, g); }
+            }
             v = g + m.x;
         }
         px[c] = v;

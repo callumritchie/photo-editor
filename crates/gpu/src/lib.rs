@@ -284,6 +284,8 @@ struct DemosaicUniform {
     cfa_w: u32,
     cfa_h: u32,
     pattern: [u32; 36],
+    /// pe_pipeline::demosaic::direction_table, [position * 4 + direction].
+    dirs: [[u32; 4]; 144],
 }
 
 /// A GPU device with the develop pipelines compiled.
@@ -546,12 +548,20 @@ impl Gpu {
         for (k, c) in cfa.colors.iter().enumerate() {
             pattern[k] = *c as u32;
         }
+        let mut dirs = [[0u32; 4]; 144];
+        for (k, t) in pe_pipeline::demosaic::direction_table(cfa)
+            .iter()
+            .enumerate()
+        {
+            dirs[k * 4..k * 4 + 4].copy_from_slice(t);
+        }
         let u = DemosaicUniform {
             w,
             h,
             cfa_w: cfa.width as u32,
             cfa_h: cfa.height as u32,
             pattern,
+            dirs,
         };
         use wgpu::BufferUsages as U;
         let d = &self.device;

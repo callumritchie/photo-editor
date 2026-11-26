@@ -8,6 +8,12 @@
 //!   otherwise by averaging neighbouring greens. (2) Interpolate red and blue as *colour differences*
 //!   (R-G, B-G), which vary slowly across edges, then add green back. Much sharper with far less
 //!   colour fringing than plain averaging.
+//! - Other patterns (Fujifilm X-Trans, 6x6) use this project's directional interpolation, see
+//!   [`green_directional`]: along four directions, the nearest greens on each side give a linear
+//!   estimate, corrected by half the curvature of the centre's own colour along the same line (the
+//!   Hamilton-Adams idea, generalised to uneven spacing); the estimates are blended with weights
+//!   falling with each direction's gradient. Red and blue colour differences are averaged with
+//!   weights favouring neighbours of similar green, so they do not bleed across edges.
 
 use pe_raw::Cfa;
 use rayon::prelude::*;
@@ -59,11 +65,32 @@ fn median3x3(src: &[f32], width: usize, height: usize) -> Vec<f32> {
 
 /// Demosaic into interleaved RGB using green estimation followed by colour-difference interpolation.
 pub fn colour_difference(data: &[f32], width: usize, height: usize, cfa: &Cfa) -> Vec<f32> {
+    colour_difference_with(data, width, height, cfa, false)
+}
+
+/// The previous treatment of non-Bayer patterns (plain averages of greens and colour differences)
+/// followed by [`median_refine`]; kept to measure the directional method against.
+pub fn basic_xtrans(data: &[f32], width: usize, height: usize, cfa: &Cfa) -> Vec<f32> {
+    let mut rgb = colour_difference_with(data, width, height, cfa, true);
+    median_refine(&mut rgb, width, height, 1);
+    rgb
+}
+
+fn colour_difference_with(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    cfa: &Cfa,
+    basic: bool,
+) -> Vec<f32> {
     assert_eq!(data.len(), width * height);
-    let green = if cfa.width == 2 && cfa.height == 2 {
+    let bayer = cfa.width == 2 && cfa.height == 2;
+    let green = if bayer {
         green_hamilton_adams(data, width, height, cfa)
-    } else {
+    } else if basic {
         green_average(data, width, height, cfa)
+    } else {
+        green_directional(data, width, height, cfa)
     };
     let mut out = vec![0.0f32; width * height * 3];
     out.par_chunks_mut(width * 3)
@@ -78,10 +105,13 @@ pub fn colour_difference(data: &[f32], width: usize, height: usize, cfa: &Cfa) -
                     px[c] = if c == own {
                         data[y * width + x]
                     } else {
-                        let diff = diff_average(data, &green, width, height, cfa, x, y, c as u8, 1)
-                            .or_else(|| {
-                                diff_average(data, &green, width, height, cfa, x, y, c as u8, 2)
-                            })
+                        let avg = if bayer || basic {
+                            diff_average
+                        } else {
+                            diff_weighted
+                        };
+                        let diff = avg(data, &green, width, height, cfa, x, y, c as u8, 1)
+                            .or_else(|| avg(data, &green, width, height, cfa, x, y, c as u8, 2))
                             .unwrap_or(0.0);
                         g + diff
                     };
@@ -121,7 +151,153 @@ fn diff_average(
     (n > 0).then(|| sum / n as f32)
 }
 
-fn green_average(data: &[f32], width: usize, height: usize, cfa: &Cfa) -> Vec<f32> {
+/// Like [`diff_average`], weighting each site by how close its green is to the centre's
+/// (1 / (|Δg| + [`DIFF_EPS`])), so colour does not bleed across edges.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn diff_weighted(
+    data: &[f32],
+    green: &[f32],
+    width: usize,
+    height: usize,
+    cfa: &Cfa,
+    x: usize,
+    y: usize,
+    color: u8,
+    radius: usize,
+) -> Option<f32> {
+    let (x0, x1) = (x.saturating_sub(radius), (x + radius).min(width - 1));
+    let (y0, y1) = (y.saturating_sub(radius), (y + radius).min(height - 1));
+    let g0 = green[y * width + x];
+    let (mut sum, mut wsum) = (0.0f32, 0.0f32);
+    for yy in y0..=y1 {
+        for xx in x0..=x1 {
+            if cfa.color_at(yy, xx) == color {
+                let i = yy * width + xx;
+                let w = 1.0 / ((green[i] - g0).abs() + DIFF_EPS);
+                sum += w * (data[i] - green[i]);
+                wsum += w;
+            }
+        }
+    }
+    (wsum > 0.0).then(|| sum / wsum)
+}
+
+/// Regularisation of the colour-difference weights.
+pub const DIFF_EPS: f32 = 2e-3;
+/// Regularisation of the directional green weights (on 0..1 sensor values).
+pub const DIR_EPS: f32 = 1e-2;
+/// Directions of [`green_directional`]: horizontal, vertical and the two diagonals.
+pub const DIRECTIONS: [(isize, isize); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+
+/// Per CFA position (row-major over the pattern) and direction: steps to the nearest green on the
+/// positive and negative side, then to the nearest sample of the position's own colour on each side
+/// (0 = none within 6 steps). Green positions are all zeros.
+pub fn direction_table(cfa: &Cfa) -> Vec<[[u32; 4]; 4]> {
+    let (cw, ch) = (cfa.width, cfa.height);
+    let colour = |x: isize, y: isize| {
+        cfa.colors[(y.rem_euclid(ch as isize) as usize) * cw + x.rem_euclid(cw as isize) as usize]
+    };
+    (0..cw * ch)
+        .map(|k| {
+            let (x, y) = ((k % cw) as isize, (k / cw) as isize);
+            let own = colour(x, y);
+            let mut t = [[0u32; 4]; 4];
+            if own == 1 {
+                return t;
+            }
+            for (d, &(dx, dy)) in DIRECTIONS.iter().enumerate() {
+                let find = |sign: isize, want: u8, max: isize| {
+                    (1..=max)
+                        .find(|&s| colour(x + sign * s * dx, y + sign * s * dy) == want)
+                        .map_or(0, |s| s as u32)
+                };
+                t[d] = [
+                    find(1, 1, 3),
+                    find(-1, 1, 3),
+                    find(1, own, 6),
+                    find(-1, own, 6),
+                ];
+            }
+            t
+        })
+        .collect()
+}
+
+/// Green at one non-green site by directional interpolation (see the module notes); `None` when no
+/// direction has greens on both sides inside the image.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn green_at(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    table: &[[u32; 4]; 4],
+    x: usize,
+    y: usize,
+) -> Option<f32> {
+    let c = data[y * width + x];
+    let at = |s: u32, sign: isize, (dx, dy): (isize, isize)| -> Option<f32> {
+        let (xx, yy) = (
+            x as isize + sign * s as isize * dx,
+            y as isize + sign * s as isize * dy,
+        );
+        (xx >= 0 && yy >= 0 && (xx as usize) < width && (yy as usize) < height)
+            .then(|| data[yy as usize * width + xx as usize])
+    };
+    let (mut sum, mut wsum) = (0.0f32, 0.0f32);
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for (d, &dir) in DIRECTIONS.iter().enumerate() {
+        let [a, b, ap, am] = table[d];
+        if a == 0 || b == 0 {
+            continue;
+        }
+        let (Some(gp), Some(gm)) = (at(a, 1, dir), at(b, -1, dir)) else {
+            continue;
+        };
+        let (af, bf) = (a as f32, b as f32);
+        let lin_g = (gp * bf + gm * af) / (af + bf);
+        let mut corr = 0.0;
+        if ap > 0 && am > 0 {
+            if let (Some(cp), Some(cm)) = (at(ap, 1, dir), at(am, -1, dir)) {
+                let (apf, amf) = (ap as f32, am as f32);
+                corr = c - (cp * amf + cm * apf) / (apf + amf);
+            }
+        }
+        let est = lin_g + 0.5 * corr;
+        let grad = (gp - gm).abs() + corr.abs();
+        let w = 1.0 / (grad + DIR_EPS);
+        sum += w * est;
+        wsum += w;
+        lo = lo.min(gp.min(gm));
+        hi = hi.max(gp.max(gm));
+    }
+    (wsum > 0.0).then(|| (sum / wsum).clamp(lo, hi))
+}
+
+/// Green everywhere for non-Bayer patterns (X-Trans) by [`green_at`], falling back to the mean of
+/// nearby greens at the image border.
+pub fn green_directional(data: &[f32], width: usize, height: usize, cfa: &Cfa) -> Vec<f32> {
+    let table = direction_table(cfa);
+    let mut g = vec![0.0f32; width * height];
+    g.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = if cfa.color_at(y, x) == 1 {
+                data[y * width + x]
+            } else {
+                let k = (y % cfa.height) * cfa.width + x % cfa.width;
+                green_at(data, width, height, &table[k], x, y)
+                    .or_else(|| average(data, width, height, cfa, x, y, 1, 1))
+                    .or_else(|| average(data, width, height, cfa, x, y, 1, 2))
+                    .unwrap_or(0.0)
+            };
+        }
+    });
+    g
+}
+
+/// The previous X-Trans green (mean of nearby greens), kept for comparison in tests.
+pub fn green_average(data: &[f32], width: usize, height: usize, cfa: &Cfa) -> Vec<f32> {
     let mut g = vec![0.0f32; width * height];
     g.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
         for (x, v) in row.iter_mut().enumerate() {
