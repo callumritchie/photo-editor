@@ -35,6 +35,9 @@ pub enum DevelopCommand {
     #[serde(rename_all = "camelCase")]
     ApplyPreset {
         preset_id: i64,
+        /// Strength, 0..2 (1 = as saved); see [`pe_develop::blend`].
+        #[serde(default = "one")]
+        amount: f32,
     },
     Reset,
     #[serde(rename_all = "camelCase")]
@@ -99,6 +102,10 @@ pub struct Preset {
     pub name: String,
     pub groups: Vec<Group>,
     pub settings: Settings,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 fn parse_settings(s: &str) -> Result<Settings> {
@@ -266,7 +273,7 @@ impl Catalog {
         cmd: &DevelopCommand,
     ) -> Result<Vec<DevelopState>> {
         let preset = match cmd {
-            DevelopCommand::ApplyPreset { preset_id } => Some(self.preset(*preset_id)?),
+            DevelopCommand::ApplyPreset { preset_id, .. } => Some(self.preset(*preset_id)?),
             _ => None,
         };
         let tx = self.conn.transaction()?;
@@ -289,11 +296,16 @@ impl Catalog {
                         Some(label.as_deref().unwrap_or("Paste Settings")),
                     )?;
                 }
-                DevelopCommand::ApplyPreset { .. } => {
+                DevelopCommand::ApplyPreset { amount, .. } => {
                     let p = preset.as_ref().expect("loaded above");
                     let (mut s, _) = current(&tx, id)?;
-                    apply_groups(&mut s, &p.settings, &p.groups);
-                    commit(&tx, id, &s, Some(&format!("Preset: {}", p.name)))?;
+                    pe_develop::blend(&mut s, &p.settings, &p.groups, *amount);
+                    let label = if (*amount - 1.0).abs() < 1e-6 {
+                        format!("Preset: {}", p.name)
+                    } else {
+                        format!("Preset: {} ({:.0}%)", p.name, amount * 100.0)
+                    };
+                    commit(&tx, id, &s, Some(&label))?;
                 }
                 DevelopCommand::Reset => commit(&tx, id, &Settings::default(), Some("Reset"))?,
                 DevelopCommand::GoToStep { step_id } => go_to(&tx, id, *step_id)?,

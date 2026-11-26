@@ -151,7 +151,13 @@ fn presets_save_apply_replace_delete() {
 
     set(&mut cat, ids[0], |s| s.exposure = -0.5);
     let st = cat
-        .develop_execute(&ids, &Cmd::ApplyPreset { preset_id: p.id })
+        .develop_execute(
+            &ids,
+            &Cmd::ApplyPreset {
+                preset_id: p.id,
+                amount: 1.0,
+            },
+        )
         .unwrap()
         .remove(0);
     assert_eq!(

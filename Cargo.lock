@@ -1470,6 +1470,7 @@ dependencies = [
  "pe-pipeline",
  "pe-preview",
  "pe-raw",
+ "quick-xml",
  "rayon",
  "rusqlite",
  "serde",

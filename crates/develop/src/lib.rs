@@ -157,6 +157,55 @@ pub fn apply_groups(dst: &mut Settings, src: &Settings, groups: &[Group]) {
     *dst = serde_json::from_value(serde_json::Value::Object(to)).expect("settings round-trip");
 }
 
+/// Apply `groups` of `src` onto `dst` at `amount` (0..2; 1 = [`apply_groups`]): numbers move from
+/// `dst`'s value towards `src`'s by that fraction (beyond it above 1), element by element in arrays
+/// and objects of the same shape; anything else (choices, a curve with a different number of
+/// points, masks) is taken from `src` when `amount` > 0. The result is clamped to valid ranges.
+pub fn blend(dst: &mut Settings, src: &Settings, groups: &[Group], amount: f32) {
+    let amount = amount.clamp(0.0, 2.0);
+    if amount == 0.0 {
+        return;
+    }
+    if amount == 1.0 {
+        apply_groups(dst, src, groups);
+        return;
+    }
+    fn mix(cur: &serde_json::Value, target: &serde_json::Value, t: f64) -> serde_json::Value {
+        use serde_json::Value as V;
+        match (cur, target) {
+            (V::Number(c), V::Number(p)) => match (c.as_f64(), p.as_f64()) {
+                (Some(c), Some(p)) => serde_json::json!(c + t * (p - c)),
+                _ => target.clone(),
+            },
+            (V::Array(c), V::Array(p)) if c.len() == p.len() => {
+                V::Array(c.iter().zip(p).map(|(a, b)| mix(a, b, t)).collect())
+            }
+            (V::Object(c), V::Object(p)) if c.keys().eq(p.keys()) => V::Object(
+                p.iter()
+                    .map(|(k, v)| (k.clone(), mix(&c[k], v, t)))
+                    .collect(),
+            ),
+            _ => target.clone(),
+        }
+    }
+    let from = to_json(src);
+    let mut to = to_json(dst);
+    for g in groups {
+        for k in g.keys() {
+            if let Some(v) = from.get(*k) {
+                let blended = match to.get(*k) {
+                    Some(c) => mix(c, v, amount as f64),
+                    None => v.clone(),
+                };
+                to.insert((*k).to_string(), blended);
+            }
+        }
+    }
+    let s: Settings =
+        serde_json::from_value(serde_json::Value::Object(to)).unwrap_or_else(|_| src.clone());
+    *dst = s.clamped();
+}
+
 /// Description of one numeric slider.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

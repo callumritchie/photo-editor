@@ -578,6 +578,108 @@ pub unsafe extern "C" fn pe_catalog_delete_preset(h: *mut PeCatalog, id: i64) ->
     c.inner.lock().unwrap().delete_preset(id).is_ok()
 }
 
+/// Rename / regroup a preset and optionally replace its values (`settings_json` may be null).
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_update_preset_json(
+    h: *mut PeCatalog,
+    id: i64,
+    name: *const c_char,
+    groups_json: *const c_char,
+    settings_json: *const c_char,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    let groups: Vec<pe_develop::Group> = match str_in(groups_json).map(serde_json::from_str) {
+        Some(Ok(g)) => g,
+        _ => return error_out("bad groups"),
+    };
+    let settings: Option<pe_pipeline::Settings> =
+        match str_in(settings_json).map(serde_json::from_str) {
+            Some(Ok(s)) => Some(s),
+            Some(Err(_)) => return error_out("bad settings"),
+            None => None,
+        };
+    match c.inner.lock().unwrap().update_preset(
+        id,
+        str_in(name).unwrap_or(""),
+        &groups,
+        settings.as_ref(),
+    ) {
+        Ok(p) => json_out(&p),
+        Err(e) => error_out(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_duplicate_preset(h: *mut PeCatalog, id: i64) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    match c.inner.lock().unwrap().duplicate_preset(id) {
+        Ok(p) => json_out(&p),
+        Err(e) => error_out(e),
+    }
+}
+
+/// A preset as `.pepreset` file text (`{"error"}` JSON on failure).
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_export_preset(h: *mut PeCatalog, id: i64) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    match c.inner.lock().unwrap().export_preset(id) {
+        Ok(text) => CString::new(text)
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut()),
+        Err(e) => error_out(e),
+    }
+}
+
+/// Import a preset file's text (`.pepreset` or Adobe-style `.xmp`, told apart by `file_name`):
+/// `{"preset", "unmapped": [...]}`.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_import_preset(
+    h: *mut PeCatalog,
+    text: *const c_char,
+    file_name: *const c_char,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    match c
+        .inner
+        .lock()
+        .unwrap()
+        .import_preset(str_in(text).unwrap_or(""), str_in(file_name).unwrap_or(""))
+    {
+        Ok(r) => json_out(&r),
+        Err(e) => error_out(e),
+    }
+}
+
+/// The settings applying a preset at `amount` would give a photo (nothing is applied).
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_preview_preset(
+    h: *mut PeCatalog,
+    image_id: i64,
+    preset_id: i64,
+    amount: f32,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    match c
+        .inner
+        .lock()
+        .unwrap()
+        .preview_preset(image_id, preset_id, amount)
+    {
+        Ok(s) => json_out(&s),
+        Err(e) => error_out(e),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Interactive preview image
 
@@ -1306,6 +1408,31 @@ mod tests {
             ));
             assert!(p.contains("\"name\":\"Bright\""), "{p}");
             assert!(take(pe_catalog_presets_json(h)).contains("Bright"));
+            let pid = serde_json::from_str::<serde_json::Value>(&p).unwrap()["id"]
+                .as_i64()
+                .unwrap();
+            // Edit, duplicate, export / import, preview.
+            let new_name = CString::new("Brighter").unwrap();
+            let u = take(pe_catalog_update_preset_json(
+                h,
+                pid,
+                new_name.as_ptr(),
+                groups.as_ptr(),
+                ptr::null(),
+            ));
+            assert!(u.contains("Brighter"), "{u}");
+            assert!(take(pe_catalog_duplicate_preset(h, pid)).contains("Brighter copy"));
+            let text = take(pe_catalog_export_preset(h, pid));
+            assert!(text.contains("photo-editor-preset"), "{text}");
+            let text_c = CString::new(text).unwrap();
+            let file = CString::new("Brighter.pepreset").unwrap();
+            let r = take(pe_catalog_import_preset(h, text_c.as_ptr(), file.as_ptr()));
+            assert!(
+                r.contains("Brighter (2)") && r.contains("\"unmapped\":[]"),
+                "{r}"
+            );
+            let pv = take(pe_catalog_preview_preset(h, id, pid, 0.5));
+            assert!(pv.contains("\"exposure\"") && !pv.contains("error"), "{pv}");
             let schema = take(pe_develop_schema_json());
             assert!(schema.contains("\"key\":\"exposure\"") && schema.contains("whiteBalance"));
             pe_catalog_close(h);

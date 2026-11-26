@@ -46,6 +46,8 @@ pub struct ImportOptions {
     pub batch_size: usize,
     /// Build grid thumbnails during import (otherwise they are made on first view).
     pub thumbnails: bool,
+    /// Apply this develop preset to every imported photo (its first history step).
+    pub develop_preset: Option<i64>,
     /// Testing only: fail after copying, before committing, the batch with this index.
     #[serde(skip)]
     pub simulate_crash_in_batch: Option<usize>,
@@ -59,6 +61,7 @@ impl Default for ImportOptions {
             skip_duplicates: true,
             batch_size: 64,
             thumbnails: true,
+            develop_preset: None,
             simulate_crash_in_batch: None,
         }
     }
@@ -269,6 +272,9 @@ impl Catalog {
         opts: &ImportOptions,
         progress: &mut dyn FnMut(&ImportProgress),
     ) -> Result<ImportReport> {
+        if let Some(p) = opts.develop_preset {
+            self.preset(p)?; // fail before importing anything if the preset is gone
+        }
         let mut report = ImportReport::default();
         let mut found = Vec::new();
         for s in sources {
@@ -410,6 +416,18 @@ impl Catalog {
             }
             tx.commit()?;
             report.imported += inserted.len();
+            if let Some(preset_id) = opts.develop_preset {
+                let ids: Vec<i64> = inserted.iter().map(|(id, _, _)| *id).collect();
+                if !ids.is_empty() {
+                    self.develop_execute(
+                        &ids,
+                        &crate::DevelopCommand::ApplyPreset {
+                            preset_id,
+                            amount: 1.0,
+                        },
+                    )?;
+                }
+            }
 
             if opts.thumbnails {
                 let thumbs: Vec<_> = inserted

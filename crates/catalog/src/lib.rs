@@ -5,6 +5,7 @@ pub mod develop;
 pub mod export;
 pub mod import;
 pub mod library;
+pub mod presets;
 pub mod render;
 pub mod rules;
 pub mod schema;

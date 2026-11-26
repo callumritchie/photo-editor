@@ -42,6 +42,15 @@ char *pe_catalog_develop_json(PeCatalog *h, const int64_t *ids, size_t count, co
 char *pe_catalog_presets_json(PeCatalog *h);
 char *pe_catalog_save_preset_json(PeCatalog *h, const char *name, const char *groups_json, const char *settings_json);
 bool pe_catalog_delete_preset(PeCatalog *h, int64_t id);
+/* Rename / regroup a preset; settings_json may be NULL to keep its values. */
+char *pe_catalog_update_preset_json(PeCatalog *h, int64_t id, const char *name, const char *groups_json, const char *settings_json);
+char *pe_catalog_duplicate_preset(PeCatalog *h, int64_t id);
+/* A preset as .pepreset file text. */
+char *pe_catalog_export_preset(PeCatalog *h, int64_t id);
+/* Import .pepreset / .xmp text: {"preset", "unmapped"}. */
+char *pe_catalog_import_preset(PeCatalog *h, const char *text, const char *file_name);
+/* Settings a preset would give a photo at amount (0..2), without applying it. */
+char *pe_catalog_preview_preset(PeCatalog *h, int64_t image_id, int64_t preset_id, float amount);
 
 /* Library: {"command": "collections" | "createCollection" | "addKeywords" | "stack" | ...} (see LibraryCommand) */
 char *pe_catalog_library_json(PeCatalog *h, const char *command_json);
