@@ -268,3 +268,124 @@ fn sample_raws_import_with_metadata_and_thumbnails() {
         assert!(img.capture_time.is_some(), "{}: no capture time", img.name);
     }
 }
+
+/// A JPEG with a hand-built EXIF block: Make, Model, Orientation 6 (rotate 90° clockwise to view),
+/// DateTimeOriginal, OffsetTimeOriginal and FNumber.
+fn exif_jpeg(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let img = image::RgbImage::from_fn(64, 48, |x, y| {
+        image::Rgb([200, (x * 4) as u8, (y * 5) as u8])
+    });
+    let mut plain = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut plain),
+        image::ImageFormat::Jpeg,
+    )
+    .unwrap();
+
+    // Little-endian TIFF: IFD0 then the EXIF IFD, values after each.
+    type Entry = (u16, u16, u32, Vec<u8>);
+    fn ifd(entries: &[Entry], start: usize, next_ifd: Option<usize>, out: &mut Vec<u8>) {
+        let table_len = 2 + entries.len() * 12 + 4;
+        let mut data = Vec::new();
+        out.extend((entries.len() as u16).to_le_bytes());
+        for (tag, typ, count, bytes) in entries {
+            out.extend(tag.to_le_bytes());
+            out.extend(typ.to_le_bytes());
+            out.extend(count.to_le_bytes());
+            if bytes.len() <= 4 {
+                let mut b = bytes.clone();
+                b.resize(4, 0);
+                out.extend(b);
+            } else {
+                out.extend(((start + table_len + data.len()) as u32).to_le_bytes());
+                data.extend(bytes);
+                if data.len() % 2 == 1 {
+                    data.push(0);
+                }
+            }
+        }
+        out.extend((next_ifd.unwrap_or(0) as u32).to_le_bytes());
+        out.extend(data);
+    }
+    let ascii = |s: &str| {
+        let mut b = s.as_bytes().to_vec();
+        b.push(0);
+        b
+    };
+    let exif_entries: Vec<Entry> = vec![
+        (
+            0x829D,
+            5,
+            1,
+            [28u32.to_le_bytes(), 10u32.to_le_bytes()].concat(),
+        ), // FNumber 2.8
+        (0x9003, 2, 20, ascii("2024:06:01 10:20:30")),
+        (0x9011, 2, 7, ascii("+01:00")),
+    ];
+    let mut ifd0_entries: Vec<Entry> = vec![
+        (0x010F, 2, 9, ascii("FUJIFILM")),
+        (0x0110, 2, 5, ascii("X-T3")),
+        (0x0112, 3, 1, 6u16.to_le_bytes().to_vec()),
+        (0x8769, 4, 1, vec![0; 4]), // EXIF IFD offset, filled in below
+    ];
+    let mut tiff = b"II*\0".to_vec();
+    tiff.extend(8u32.to_le_bytes());
+    // IFD0 size first (to place the EXIF IFD after it).
+    let mut probe = Vec::new();
+    ifd(&ifd0_entries, 8, None, &mut probe);
+    let exif_at = 8 + probe.len();
+    ifd0_entries[3].3 = (exif_at as u32).to_le_bytes().to_vec();
+    ifd(&ifd0_entries, 8, None, &mut tiff);
+    ifd(&exif_entries, exif_at, None, &mut tiff);
+
+    let mut app1 = b"Exif\0\0".to_vec();
+    app1.extend(tiff);
+    let mut out = plain[..2].to_vec(); // SOI
+    out.extend([0xFF, 0xE1]);
+    out.extend(((app1.len() + 2) as u16).to_be_bytes());
+    out.extend(app1);
+    out.extend(&plain[2..]);
+    fs::write(path, out).unwrap();
+}
+
+#[test]
+fn jpeg_exif_is_read_at_import_and_for_older_catalogs() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("photos");
+    exif_jpeg(&src.join("rotated.jpg"));
+    let lib = t.path().join("lib.pecat");
+    let mut cat = Catalog::create(&lib).unwrap();
+    cat.import(&[src], &ImportOptions::default(), &mut noop)
+        .unwrap();
+    let check = |cat: &Catalog| {
+        let img = &cat.images(&Query::default()).unwrap()[0];
+        assert_eq!(img.orientation, 6);
+        let camera = img.camera.as_deref().unwrap_or("");
+        assert!(
+            camera.contains("FUJIFILM") && camera.contains("X-T3"),
+            "{camera}"
+        );
+        assert_eq!(img.capture_time.as_deref(), Some("2024-06-01T10:20:30"));
+        assert!((img.f_number.unwrap() - 2.8).abs() < 1e-9);
+        // The thumbnail is upright: 64 x 48 pixels turned on their side.
+        let jpeg = cat.thumbnail(img.id).unwrap().unwrap();
+        let th = image::load_from_memory(&jpeg).unwrap();
+        assert!(th.height() > th.width(), "{}x{}", th.width(), th.height());
+    };
+    check(&cat);
+    drop(cat);
+
+    // A catalog from before JPEG EXIF was read: blank the fields and forget the one-time pass.
+    {
+        let c = rusqlite::Connection::open(lib.join("catalog.sqlite")).unwrap();
+        c.execute_batch(
+            "UPDATE images SET orientation = 1, camera_make = NULL, camera_model = NULL,
+                 capture_time = NULL, capture_offset = NULL, f_number = NULL;
+             DELETE FROM meta WHERE key = 'image_exif_read';",
+        )
+        .unwrap();
+    }
+    let cat = Catalog::open(&lib).unwrap();
+    check(&cat);
+}

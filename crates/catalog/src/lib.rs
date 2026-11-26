@@ -225,12 +225,78 @@ impl Catalog {
         schema::migrate(&mut conn)?;
         let thumbs = ThumbStore::open(&dir.join("thumbs.sqlite"))?;
         let previews = PreviewStore::open(&dir.join("previews.sqlite"))?;
-        Ok(Self {
+        let cat = Self {
             dir: dir.to_path_buf(),
             conn,
             thumbs,
             previews,
-        })
+        };
+        cat.read_missing_image_metadata()?;
+        Ok(cat)
+    }
+
+    /// Once per catalog: read EXIF for JPEGs imported before import read it (no camera and no
+    /// capture time), and drop their thumbnails and previews so rotation takes effect.
+    fn read_missing_image_metadata(&self) -> Result<()> {
+        const KEY: &str = "image_exif_read";
+        let done: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [KEY], |r| r.get(0))
+            .optional()?;
+        if done.is_some() {
+            return Ok(());
+        }
+        let rows: Vec<(i64, String)> = {
+            let mut st = self.conn.prepare(
+                "SELECT i.id, r.path, fo.rel_path, f.name
+                 FROM images i JOIN files f ON f.id = i.file_id JOIN folders fo ON fo.id = f.folder_id
+                      JOIN roots r ON r.id = fo.root_id
+                 WHERE i.camera_make IS NULL AND i.capture_time IS NULL
+                   AND (LOWER(f.name) LIKE '%.jpg' OR LOWER(f.name) LIKE '%.jpeg')",
+            )?;
+            let it = st.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    join_path(
+                        &r.get::<_, String>(1)?,
+                        &r.get::<_, String>(2)?,
+                        &r.get::<_, String>(3)?,
+                    ),
+                ))
+            })?;
+            it.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, path) in rows {
+            let m = pe_raw::meta::image_metadata(Path::new(&path));
+            self.conn.execute(
+                "UPDATE images SET capture_time = ?2, capture_offset = ?3, orientation = ?4,
+                     camera_make = ?5, camera_model = ?6, lens = ?7, iso = ?8, exposure_time = ?9,
+                     f_number = ?10, focal_length = ?11
+                 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    m.capture_time,
+                    m.capture_offset,
+                    m.orientation.clamp(1, 8),
+                    m.make,
+                    m.model,
+                    m.lens,
+                    m.iso,
+                    m.exposure_time,
+                    m.f_number,
+                    m.focal_length
+                ],
+            )?;
+            if m.orientation != 1 {
+                self.thumbs.remove(id)?;
+                self.previews.remove(id)?;
+            }
+        }
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')",
+            [KEY],
+        )?;
+        Ok(())
     }
 
     pub fn dir(&self) -> &Path {

@@ -1599,6 +1599,7 @@ name = "pe-raw"
 version = "0.0.1"
 dependencies = [
  "image",
+ "kamadak-exif",
  "rawler",
  "thiserror",
 ]

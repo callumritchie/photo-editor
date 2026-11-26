@@ -121,6 +121,75 @@ pub fn raw_metadata(path: &Path) -> Result<Metadata, RawError> {
     })
 }
 
+/// Read descriptive metadata (EXIF) from a JPEG or other rendered image. Missing fields stay
+/// `None`; a file without EXIF gives the defaults (orientation 1).
+pub fn image_metadata(path: &Path) -> Metadata {
+    use ::exif::{In, Tag, Value};
+    let Ok(file) = std::fs::File::open(path) else {
+        return Metadata {
+            orientation: 1,
+            ..Default::default()
+        };
+    };
+    let Ok(ex) = ::exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file))
+    else {
+        return Metadata {
+            orientation: 1,
+            ..Default::default()
+        };
+    };
+    let field = |t: Tag| ex.get_field(t, In::PRIMARY);
+    let text = |t: Tag| -> Option<String> {
+        match &field(t)?.value {
+            Value::Ascii(v) => {
+                let s: String = v
+                    .iter()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let s = s
+                    .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+                    .to_string();
+                (!s.is_empty()).then_some(s)
+            }
+            _ => None,
+        }
+    };
+    let number = |t: Tag| -> Option<f64> {
+        match &field(t)?.value {
+            Value::Rational(v) => v.first().filter(|r| r.denom != 0).map(|r| r.to_f64()),
+            Value::SRational(v) => v.first().filter(|r| r.denom != 0).map(|r| r.to_f64()),
+            v => v.get_uint(0).map(f64::from),
+        }
+    };
+    let make = text(Tag::Make);
+    // Some cameras repeat the make in the model ("Canon Canon EOS R6" is avoided).
+    let model = text(Tag::Model).map(|m| match &make {
+        Some(mk) if m.to_lowercase().starts_with(&mk.to_lowercase()) && m.len() > mk.len() => {
+            m[mk.len()..].trim().to_string()
+        }
+        _ => m,
+    });
+    Metadata {
+        make,
+        model,
+        lens: text(Tag::LensModel),
+        capture_time: text(Tag::DateTimeOriginal)
+            .or_else(|| text(Tag::DateTime))
+            .and_then(|s| exif_date_to_iso(&s)),
+        capture_offset: text(Tag::OffsetTimeOriginal),
+        iso: number(Tag::PhotographicSensitivity).map(|v| v as u32),
+        exposure_time: number(Tag::ExposureTime),
+        f_number: number(Tag::FNumber),
+        focal_length: number(Tag::FocalLength),
+        orientation: field(Tag::Orientation)
+            .and_then(|f| f.value.get_uint(0))
+            .map(|o| o as u8)
+            .filter(|o| (1..=8).contains(o))
+            .unwrap_or(1),
+    }
+}
+
 /// A preview image embedded in a raw file (not rotated): the first of thumbnail, preview and full-size
 /// embedded images whose long edge reaches `min_long_edge`, else the largest available. `None` if the
 /// file has no extractable preview.

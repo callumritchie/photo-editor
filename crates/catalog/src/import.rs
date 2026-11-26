@@ -318,10 +318,7 @@ impl Catalog {
                 .par_iter()
                 .map(|c| match c.kind {
                     FileKind::Raw => meta::raw_metadata(&c.path).unwrap_or_default(),
-                    FileKind::Jpeg => Metadata {
-                        orientation: 1,
-                        ..Default::default()
-                    },
+                    FileKind::Jpeg => meta::image_metadata(&c.path),
                 })
                 .collect();
 

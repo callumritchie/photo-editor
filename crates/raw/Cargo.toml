@@ -10,3 +10,4 @@ publish.workspace = true
 rawler.workspace = true
 thiserror.workspace = true
 image.workspace = true
+kamadak-exif.workspace = true
