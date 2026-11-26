@@ -15,7 +15,11 @@ fn frame(w: usize, h: usize) -> RawFrame {
     let data = (0..w * h)
         .flat_map(|i| {
             let x = i % w;
-            let base = if (x / 12).is_multiple_of(2) { 0.08 } else { 0.3 };
+            let base = if (x / 12).is_multiple_of(2) {
+                0.08
+            } else {
+                0.3
+            };
             [0, 1, 2]
                 .map(|c| ((base * (1.0 + 0.25 * noise(i * 3 + c))) * 0.6 + 0.35 * 0.4).max(0.0))
         })
