@@ -1,3 +1,4 @@
+import CPeFFI
 import AppKit
 import SwiftUI
 
@@ -64,6 +65,10 @@ final class AppState: ObservableObject {
         let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first!
         catalogPath = env ?? pictures.appendingPathComponent("PhotoEditor Library.pecat").path
         thumbCache.countLimit = 4000
+        if let lensDB = Bundle.main.resourceURL?.appendingPathComponent("lensfun").path,
+           FileManager.default.fileExists(atPath: lensDB) {
+            pe_set_lens_database(lensDB)
+        }
         do {
             core = try Core(catalogPath: catalogPath)
         } catch {

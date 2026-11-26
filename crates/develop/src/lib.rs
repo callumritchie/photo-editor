@@ -197,15 +197,27 @@ pub struct ChoiceSpec {
     pub key: &'static str,
     pub label: &'static str,
     pub section: &'static str,
+    /// Tab within the section (shown only on that tab).
+    pub subsection: Option<&'static str>,
     pub options: &'static [(&'static str, &'static str)],
 }
 
-pub const CHOICES: [ChoiceSpec; 1] = [ChoiceSpec {
-    key: "treatment",
-    label: "Treatment",
-    section: "Tone",
-    options: &[("color", "Color"), ("monochrome", "Black & White")],
-}];
+pub const CHOICES: [ChoiceSpec; 2] = [
+    ChoiceSpec {
+        key: "treatment",
+        label: "Treatment",
+        section: "Tone",
+        subsection: None,
+        options: &[("color", "Color"), ("monochrome", "Black & White")],
+    },
+    ChoiceSpec {
+        key: "lens.profile",
+        label: "Profile Corrections",
+        section: "Geometry",
+        subsection: Some("Lens"),
+        options: &[("off", "Off"), ("on", "On")],
+    },
+];
 
 /// Names of the colour-mixer hue bands, in settings order.
 pub const BAND_NAMES: [&str; pe_pipeline::HUE_BANDS] = [
@@ -469,6 +481,17 @@ fn build_params() -> Vec<ParamSpec> {
         default: 100.0,
         ..g("transform.scale", "Scale", Group::Transform, "Transform")
     });
+    for (key, label) in [
+        ("lens.profileDistortion", "Profile Distortion"),
+        ("lens.profileVignetting", "Profile Vignetting"),
+    ] {
+        v.push(ParamSpec {
+            min: 0.0,
+            max: 200.0,
+            default: 100.0,
+            ..g(key, label, Group::LensCorrections, "Lens")
+        });
+    }
     v.push(g(
         "lens.distortion",
         "Distortion",

@@ -50,7 +50,21 @@ pub struct GeometryParams {
     pub ca: [f32; 3],
     /// Lens vignetting correction, stops at the corners.
     pub lens_vignette: f32,
+    /// Lens profile (identity when off): distortion factor coefficients with the amount applied,
+    /// red / blue TCA factors, and the normalised radius per sensor pixel.
+    pub pdist: [f32; 5],
+    pub ptca: [[f32; 3]; 2],
+    pub pr_scale: f32,
+    /// Zoom applied with the profile so the corrected picture fills the frame.
+    pub pfit: f32,
+    /// Profile vignetting `1 + k1 r² + k2 r⁴ + k3 r⁶`, radius per sensor pixel, and amount (0 = off).
+    pub pvig: [f32; 3],
+    pub pv_scale: f32,
+    pub pv_amount: f32,
 }
+
+const PDIST_IDENTITY: [f32; 5] = [1.0, 0.0, 0.0, 0.0, 0.0];
+const PTCA_IDENTITY: [[f32; 3]; 2] = [[1.0, 0.0, 0.0]; 2];
 
 impl GeometryParams {
     pub fn new(s: &Settings, src_w: usize, src_h: usize, orientation: u8) -> Self {
@@ -105,7 +119,98 @@ impl GeometryParams {
             k1: -l.distortion / 100.0 * DISTORTION_MAX,
             ca,
             lens_vignette: l.vignetting / 100.0 * LENS_VIGNETTE_STOPS,
+            pdist: PDIST_IDENTITY,
+            ptca: PTCA_IDENTITY,
+            pr_scale: 0.0,
+            pfit: 1.0,
+            pvig: [0.0; 3],
+            pv_scale: 0.0,
+            pv_amount: 0.0,
         }
+    }
+
+    /// [`new`](Self::new) for a photo, with its lens profile when the settings turn it on and the
+    /// lens is in the database. `src_w` x `src_h` is the whole frame's size.
+    pub fn for_frame(s: &Settings, frame: &pe_raw::RawFrame, src_w: usize, src_h: usize) -> Self {
+        let g = Self::new(s, src_w, src_h, frame.orientation);
+        match profile_for(s, frame) {
+            Some(p) => g.with_profile(
+                &p,
+                s.lens.profile_distortion / 100.0,
+                s.lens.profile_vignetting / 100.0,
+            ),
+            None => g,
+        }
+    }
+
+    /// Apply a lens profile with the given amounts (1 = as calibrated).
+    pub fn with_profile(mut self, p: &pe_lens::Profile, dist_amount: f32, vig_amount: f32) -> Self {
+        let half_diag = 0.5 * (self.src_w as f32).hypot(self.src_h as f32);
+        if p.has_distortion && dist_amount > 0.0 {
+            for (k, d) in self.pdist.iter_mut().enumerate() {
+                *d = PDIST_IDENTITY[k] + dist_amount * (p.distortion[k] - PDIST_IDENTITY[k]);
+            }
+        }
+        if p.has_tca {
+            self.ptca = [p.tca_red, p.tca_blue];
+        }
+        self.pr_scale = p.dist_scale / half_diag;
+        if p.has_vignetting && vig_amount > 0.0 {
+            self.pvig = p.vignetting;
+            self.pv_scale = p.vig_scale / half_diag;
+            self.pv_amount = vig_amount;
+        }
+        if self.pdist != PDIST_IDENTITY || self.ptca != PTCA_IDENTITY {
+            self.active = true;
+            self.pfit = self.fill_scale();
+        }
+        self
+    }
+
+    /// Profile distortion and TCA factor for a sensor offset (dx, dy) from the centre, channel c.
+    #[inline]
+    fn profile_factor(&self, dx: f32, dy: f32, c: usize) -> f32 {
+        let r = (dx * dx + dy * dy).sqrt() * self.pr_scale;
+        let d = &self.pdist;
+        let f = d[0] + r * (d[1] + r * (d[2] + r * (d[3] + r * d[4])));
+        if c == 1 {
+            return f;
+        }
+        let t = &self.ptca[if c == 0 { 0 } else { 1 }];
+        let rd = r * f;
+        f * (t[0] + rd * (t[1] + rd * t[2]))
+    }
+
+    /// Largest zoom-out (between 0.5 and 1.5) for which the corrected frame's border still samples
+    /// inside the photo.
+    fn fill_scale(&self) -> f32 {
+        let (hw, hh) = (self.src_w as f32 * 0.5, self.src_h as f32 * 0.5);
+        let border: Vec<(f32, f32)> = (0..=32)
+            .flat_map(|i| {
+                let t = i as f32 / 32.0 * 2.0 - 1.0;
+                [(t * hw, -hh), (t * hw, hh), (-hw, t * hh), (hw, t * hh)]
+            })
+            .collect();
+        let fits = |s: f32| {
+            border.iter().all(|&(x, y)| {
+                let (x, y) = (x * s, y * s);
+                let f = self.profile_factor(x, y, 1);
+                (x * f).abs() <= hw * 1.0005 && (y * f).abs() <= hh * 1.0005
+            })
+        };
+        let (mut lo, mut hi) = (0.5f32, 1.5f32);
+        if !fits(lo) {
+            return 1.0;
+        }
+        for _ in 0..30 {
+            let m = 0.5 * (lo + hi);
+            if fits(m) {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        lo
     }
 
     /// Output size when [`active`](Self::active); otherwise the oriented frame size.
@@ -160,7 +265,16 @@ impl GeometryParams {
         let (dx, dy) = (sx - sw * 0.5, sy - sh * 0.5);
         let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
         let f = (1.0 + self.k1 * r2) * self.ca[c];
-        (sw * 0.5 + dx * f, sh * 0.5 + dy * f)
+        let (mut ex, mut ey) = (dx * f, dy * f);
+        // 7. lens profile: zoom to fill, distortion, TCA (corrected -> photo radius).
+        if self.pdist != PDIST_IDENTITY || self.ptca != PTCA_IDENTITY {
+            ex *= self.pfit;
+            ey *= self.pfit;
+            let g = self.profile_factor(ex, ey, c);
+            ex *= g;
+            ey *= g;
+        }
+        (sw * 0.5 + ex, sh * 0.5 + ey)
     }
 
     /// Lens vignetting gain for sensor pixel (x, y).
@@ -169,7 +283,19 @@ impl GeometryParams {
         let (sw, sh) = (self.src_w as f32, self.src_h as f32);
         let (dx, dy) = (x as f32 + 0.5 - sw * 0.5, y as f32 + 0.5 - sh * 0.5);
         let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
-        (self.lens_vignette * r2).exp2()
+        let mut g = (self.lens_vignette * r2).exp2();
+        if self.pv_amount > 0.0 {
+            let rv2 = (dx * dx + dy * dy) * self.pv_scale * self.pv_scale;
+            let k = &self.pvig;
+            let fall = (1.0 + rv2 * (k[0] + rv2 * (k[1] + rv2 * k[2]))).max(0.05);
+            g *= fall.powf(-self.pv_amount);
+        }
+        g
+    }
+
+    /// Whether [`lens_gain`](Self::lens_gain) is not 1 everywhere.
+    pub fn has_lens_gain(&self) -> bool {
+        self.lens_vignette != 0.0 || self.pv_amount > 0.0
     }
 }
 
@@ -297,6 +423,26 @@ impl GeometryParams {
     }
 }
 
+/// The lens profile for a photo when the settings turn profiles on and its lens is in the database.
+pub fn profile_for(s: &Settings, frame: &pe_raw::RawFrame) -> Option<pe_lens::Profile> {
+    lens_match(s, frame).map(|m| m.profile)
+}
+
+/// The database match for a photo's lens (when profiles are on).
+pub fn lens_match(s: &Settings, frame: &pe_raw::RawFrame) -> Option<pe_lens::Match> {
+    if s.lens.profile != crate::settings::ProfileMode::On {
+        return None;
+    }
+    let l = frame.lens.as_ref()?;
+    pe_lens::lookup(&pe_lens::Shot {
+        camera_make: frame.make.clone(),
+        camera_model: frame.model.clone(),
+        lens: l.name.clone(),
+        focal_length: l.focal_length,
+        aperture: l.aperture,
+    })
+}
+
 /// Scale of the largest centred rectangle with the frame's aspect ratio that fits inside the frame
 /// rotated by `angle_deg` (for auto-cropping when straightening).
 pub fn straighten_fit(w: f32, h: f32, angle_deg: f32) -> f32 {
@@ -402,6 +548,74 @@ mod tests {
         .unwrap();
         let (fx, fy) = GeometryParams::new(&s, 600, 400, 1).output_to_frame(0.5, 0.5);
         assert!((fx - 0.75).abs() < 1e-4 && (fy - 0.5).abs() < 1e-4);
+    }
+
+    fn barrel() -> pe_lens::Profile {
+        // A barrel lens: the photo's radius is 8 % short of the true one at r = 1.
+        pe_lens::Profile {
+            distortion: [1.0, 0.0, -0.08, 0.0, 0.0],
+            tca_red: [1.001, 0.0, 0.0],
+            tca_blue: [0.999, 0.0, 0.0],
+            vignetting: [-0.5, 0.0, 0.0],
+            has_distortion: true,
+            has_tca: true,
+            has_vignetting: true,
+            dist_scale: 1.8,
+            vig_scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn lens_profile_maps_radially_and_fills_the_frame() {
+        let (w, h) = (600, 400);
+        let s = Settings::default();
+        assert!(!GeometryParams::new(&s, w, h, 1).active);
+        // Amount 0: no change at all.
+        let none = GeometryParams::new(&s, w, h, 1).with_profile(&barrel(), 0.0, 0.0);
+        assert_eq!(none.pdist, PDIST_IDENTITY);
+        assert!(!none.has_lens_gain());
+        let p = GeometryParams::new(&s, w, h, 1).with_profile(&barrel(), 1.0, 1.0);
+        assert!(p.active);
+        // Barrel correction samples nearer the centre, so the fill zoom is > 1 (more of the field).
+        assert!(p.pfit > 1.0 && p.pfit < 1.2, "{}", p.pfit);
+        // Every border pixel of the output samples inside the photo (no empty corners).
+        for (x, y) in [
+            (0, 0),
+            (w - 1, 0),
+            (0, h - 1),
+            (w - 1, h - 1),
+            (w / 2, 0),
+            (0, h / 2),
+        ] {
+            for c in 0..3 {
+                let (sx, sy) = p.source(x, y, c);
+                assert!(
+                    (-0.6..=w as f32 + 0.6).contains(&sx) && (-0.6..=h as f32 + 0.6).contains(&sy),
+                    "{x},{y},{c}: {sx},{sy}"
+                );
+            }
+        }
+        // ... and some border reaches the edge (the zoom is as wide as possible).
+        let (sx, _) = p.source(0, h / 2, 1);
+        let (_, sy) = p.source(w / 2, 0, 1);
+        assert!(sx < 2.0 || sy < 2.0, "{sx} {sy}");
+        // The centre stays put; red and blue separate slightly off-centre.
+        let (cx, cy) = p.source(w / 2, h / 2, 1);
+        assert!((cx - w as f32 / 2.0).abs() < 1.0 && (cy - h as f32 / 2.0).abs() < 1.0);
+        let (r, _) = p.source(w - 20, h / 2, 0);
+        let (b, _) = p.source(w - 20, h / 2, 2);
+        assert!(r > b);
+        // Vignetting: corners brightened by 1 / (1 - 0.5 r²) with r = 1 at the corner.
+        let g = p.lens_gain(0, 0);
+        assert!((g - 2.0).abs() < 0.02, "{g}");
+        assert!((p.lens_gain(w / 2, h / 2) - 1.0).abs() < 1e-3);
+        // The amount scales distortion linearly.
+        let half = GeometryParams::new(&s, w, h, 1).with_profile(&barrel(), 0.5, 0.0);
+        assert!((half.pdist[2] + 0.04).abs() < 1e-6);
+        // Masks follow: output and frame positions still invert each other.
+        let (fx, fy) = p.output_to_frame(0.2, 0.3);
+        let (u, v) = p.frame_to_output(fx, fy);
+        assert!((u - 0.2).abs() < 1e-4 && (v - 0.3).abs() < 1e-4);
     }
 
     #[test]

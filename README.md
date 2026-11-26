@@ -52,7 +52,8 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   exposure, contrast, highlights, shadows, whites and blacks; texture, clarity and dehaze; vibrance and saturation; a colour mixer (hue, saturation and
   luminance for eight colour bands); black & white with a per-colour mix; colour grading for shadows, midtones, highlights
   and overall; sharpening and noise reduction (luminance and colour); vignette and grain; crop and straighten (press `R`
-  for the crop overlay, with aspect presets), perspective, and manual lens corrections (distortion, fringing, fall-off). Sliders update a live preview while you drag, rendered on the GPU (Metal)
+  for the crop overlay, with aspect presets), perspective, and lens corrections: automatic profiles for calibrated lenses (distortion, colour fringing and
+  fall-off, from the Lensfun database) plus manual distortion, fringing and fall-off. Sliders update a live preview while you drag, rendered on the GPU (Metal)
   in about 5–15 ms; without a GPU the CPU takes 25–55 ms. Each release records one history step. ⌘Z/⇧⌘Z undo and redo; click any history step to return to it.
   You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
   selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.

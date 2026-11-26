@@ -11,6 +11,9 @@ APP=app/build/PhotoEditor.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "app/.build/release/PhotoEditor" "$APP/Contents/MacOS/PhotoEditor"
+# Lens database (CC BY-SA 3.0 data, with its licence and notice).
+mkdir -p "$APP/Contents/Resources"
+cp -R data/lensfun "$APP/Contents/Resources/lensfun"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -69,6 +69,10 @@ uint8_t *pe_image_select_sky(PeImage *img, uint32_t *w, uint32_t *hh);
 uint8_t *pe_image_mask_overlay(PeImage *img, const char *settings_json, uint32_t index, uint32_t *w, uint32_t *hh);
 bool pe_image_pick_color(PeImage *img, const char *settings_json, float fx, float fy, float *out_lab);
 /* Convert n (x, y) points in place between output fractions and mask (frame) fractions. */
+/* Lens database folder (call once at start-up). */
+void pe_set_lens_database(const char *dir);
+/* {"lens": recorded lens or null, "profile": matched database lens or null}; free with pe_string_free. */
+char *pe_image_lens_profile(PeImage *img);
 bool pe_image_map_points(PeImage *img, const char *settings_json, bool to_frame, float *pts, size_t n);
 
 /* 1:1 viewing: full-resolution output size, and a rectangle of it rendered at 1:1 (RGBA8). */

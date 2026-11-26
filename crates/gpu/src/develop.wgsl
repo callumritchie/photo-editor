@@ -30,6 +30,11 @@ struct Params {
     full: vec4<u32>,      // whole sensor frame width, height; this frame's origin x, y
     outr: vec4<u32>,      // output origin x, y; whole-picture output width, height
     offs2: vec4<u32>,     // pool offsets: masked noise-reduction target (+ sharpness gain), dehaze target
+    lens0: vec4<f32>,     // lens profile distortion d0..d3
+    lens1: vec4<f32>,     // d4, radius per pixel, fill zoom, on
+    lens2: vec4<f32>,     // red TCA v, c, b; vignetting radius per pixel
+    lens3: vec4<f32>,     // blue TCA v, c, b; vignetting amount
+    lens4: vec4<f32>,     // vignetting k1, k2, k3
 };
 
 // Per-pass parameters for the generic kernels.
@@ -132,12 +137,18 @@ fn scene_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let cam = vec3<f32>(src[3u * i], src[3u * i + 1u], src[3u * i + 2u]);
     let b = reconstruct(cam);
     var w = vec3<f32>(dot(P.m0.xyz, b), dot(P.m1.xyz, b), dot(P.m2.xyz, b)) * P.wb.w;
-    if (P.geo2.z != 0.0) {
+    if (P.geo2.z != 0.0 || P.lens3.w > 0.0) {
         let sw = f32(P.full.x);
         let sh = f32(P.full.y);
         let dx = f32(i % P.dims.x + P.full.z) + 0.5 - sw * 0.5;
         let dy = f32(i / P.dims.x + P.full.w) + 0.5 - sh * 0.5;
         w *= exp2(P.geo2.z * (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25));
+        if (P.lens3.w > 0.0) {
+            let rv2 = (dx * dx + dy * dy) * P.lens2.w * P.lens2.w;
+            let k = P.lens4;
+            let fall = max(1.0 + rv2 * (k.x + rv2 * (k.y + rv2 * k.z)), 0.05);
+            w *= pow(fall, -P.lens3.w);
+        }
     }
     pool[P.offs.x + i] = vec4<f32>(w, log2(max(luma(w), 1.0e-6)));
 }
@@ -871,8 +882,23 @@ fn geo_source(x: u32, y: u32, c: u32) -> vec2<f32> {
     let dy = s.y - sh * 0.5;
     let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
     let f = (1.0 + P.geo2.y * r2) * P.geo3[c];
+    var e = vec2<f32>(dx * f, dy * f);
+    // Lens profile: zoom to fill, distortion, TCA.
+    if (P.lens1.w > 0.5) {
+        e *= P.lens1.z;
+        let r = length(e) * P.lens1.y;
+        let d = P.lens0;
+        var g = d.x + r * (d.y + r * (d.z + r * (d.w + r * P.lens1.x)));
+        if (c != 1u) {
+            var t = P.lens2.xyz;
+            if (c == 2u) { t = P.lens3.xyz; }
+            let rd = r * g;
+            g *= t.x + rd * (t.y + rd * t.z);
+        }
+        e *= g;
+    }
     // Into this frame's pixel coordinates.
-    return vec2<f32>(sw * 0.5 + dx * f - f32(P.full.z), sh * 0.5 + dy * f - f32(P.full.w));
+    return vec2<f32>(sw * 0.5 + e.x - f32(P.full.z), sh * 0.5 + e.y - f32(P.full.w));
 }
 
 fn geo_sample(off: u32, p: vec2<f32>, c: u32) -> f32 {

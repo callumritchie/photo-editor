@@ -607,6 +607,33 @@ fn gpu() -> Option<&'static pe_gpu::Gpu> {
     GPU.get_or_init(pe_gpu::Gpu::new).as_ref()
 }
 
+/// Use the lens database in `dir` (the app's bundled copy). Call once, before opening photos.
+#[no_mangle]
+pub unsafe extern "C" fn pe_set_lens_database(dir: *const c_char) {
+    if let Some(d) = str_in(dir) {
+        pe_lens::set_database_dir(d);
+    }
+}
+
+/// The lens profile for a photo as JSON: `{"lens": "<recorded lens>", "profile": "<database lens>"}`
+/// (either may be null). Caller frees with `pe_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_lens_profile(img: *mut PeImage) -> *mut c_char {
+    let Some(img) = img.as_ref() else {
+        return ptr::null_mut();
+    };
+    let mut s = pe_pipeline::Settings::default();
+    s.lens.profile = pe_pipeline::ProfileMode::On;
+    let m = pe_pipeline::geometry::lens_match(&s, &img.preview);
+    let v = serde_json::json!({
+        "lens": img.preview.lens.as_ref().map(|l| l.name.clone()),
+        "profile": m.map(|m| m.name),
+    });
+    CString::new(v.to_string())
+        .map(CString::into_raw)
+        .unwrap_or(ptr::null_mut())
+}
+
 /// Name of the renderer used for interactive previews, e.g. "Apple M1 (Metal)" or "CPU".
 #[no_mangle]
 pub extern "C" fn pe_renderer_name() -> *mut c_char {
@@ -835,11 +862,11 @@ pub unsafe extern "C" fn pe_image_output_size(
         Ok(s) => s.unwrap_or_default().clamped(),
         Err(_) => return false,
     };
-    let g = pe_pipeline::geometry::GeometryParams::new(
+    let g = pe_pipeline::geometry::GeometryParams::for_frame(
         &s,
+        &img.full,
         img.full.width,
         img.full.height,
-        img.full.orientation,
     );
     let (ow, oh) = g.output_size();
     if !w.is_null() {
@@ -1017,11 +1044,11 @@ pub unsafe extern "C" fn pe_image_map_points(
         Ok(s) => s.unwrap_or_default().clamped(),
         Err(_) => return false,
     };
-    let g = pe_pipeline::geometry::GeometryParams::new(
+    let g = pe_pipeline::geometry::GeometryParams::for_frame(
         &s,
+        &img.preview,
         img.preview.width,
         img.preview.height,
-        img.preview.orientation,
     );
     for p in std::slice::from_raw_parts_mut(pts, n * 2).chunks_mut(2) {
         let (a, b) = if to_frame {

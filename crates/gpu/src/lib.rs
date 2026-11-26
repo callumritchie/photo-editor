@@ -59,6 +59,13 @@ struct Params {
     outr: [u32; 4],
     /// Local-detail target planes: noise reduction / sharpness, dehaze; unused, unused.
     offs2: [u32; 4],
+    /// Lens profile (pe_pipeline::geometry): distortion d0..d3; d4, radius scale, fill zoom, on;
+    /// red TCA, vignetting radius scale; blue TCA, vignetting amount; vignetting k1..k3.
+    lens0: [f32; 4],
+    lens1: [f32; 4],
+    lens2: [f32; 4],
+    lens3: [f32; 4],
+    lens4: [f32; 4],
 }
 
 /// Per-pass record for the generic kernels (matches `struct Pass` in the shader).
@@ -319,7 +326,6 @@ pub struct GpuFrame {
     /// Where this frame sits in the whole picture.
     ctx: region::Ctx,
     planes: Planes,
-    orientation: u8,
     header: RawFrame,
     auto_wb: [f32; 3],
     /// Camera RGB, for the airlight and noise estimates (computed on the CPU from sampled pixels).
@@ -696,7 +702,6 @@ impl Gpu {
             geo,
             ctx,
             planes,
-            orientation: frame.orientation,
             header: frame.clone_header(),
             // Grey-world needs the pixels; compute it now so no CPU copy has to be kept.
             auto_wb: wb::multipliers(frame, &WhiteBalance::Auto, &frame.data),
@@ -774,13 +779,13 @@ impl Gpu {
         let tp = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
         let (sev, hev) = tone::local_tone_amounts(s.shadows, s.highlights);
         let use_sh = s.shadows != 0.0 || s.highlights != 0.0;
-        let mask_geo = geometry::GeometryParams::new(&s, ctx.full_w, ctx.full_h, f.orientation);
+        let mask_geo = geometry::GeometryParams::for_frame(&s, &f.header, ctx.full_w, ctx.full_h);
         let mp = MaskParams::new(&s.masks, &s.rasters, mask_geo.frame_w, mask_geo.frame_h);
         let (use_cl, use_tx) = (
             s.clarity != 0.0 || mp.needs_clarity,
             s.texture != 0.0 || mp.needs_texture,
         );
-        let mut geo = geometry::GeometryParams::new(&s, ctx.full_w, ctx.full_h, f.orientation);
+        let mut geo = geometry::GeometryParams::for_frame(&s, &f.header, ctx.full_w, ctx.full_h);
         let orientation = geo.orientation;
         // A region always goes through the geometry pass; with no geometry set, its output is the
         // oriented frame.
@@ -809,7 +814,7 @@ impl Gpu {
                 &to_work,
                 gain,
             );
-            if geo.lens_vignette != 0.0 {
+            if geo.has_lens_gain() {
                 let g = geo.lens_gain(x + ctx.x0, y + ctx.y0);
                 c.map(|v| v * g)
             } else {
@@ -843,7 +848,10 @@ impl Gpu {
                     wbm[0].to_bits(),
                     wbm[1].to_bits(),
                     wbm[2].to_bits(),
-                    geo.lens_vignette.to_bits(),
+                    geo.lens_vignette.to_bits()
+                        ^ geo.pv_amount.to_bits().rotate_left(7)
+                        ^ geo.pvig[0].to_bits().rotate_left(13)
+                        ^ geo.pv_scale.to_bits().rotate_left(19),
                 ];
                 let mut cache = f.noise.lock().unwrap();
                 let n = match *cache {
@@ -853,7 +861,7 @@ impl Gpu {
                             let i = (y * fw + x) * 3;
                             let c = [f.host[i], f.host[i + 1], f.host[i + 2]];
                             let c = pe_pipeline::scene_pixel(c, wbm, &to_work, 1.0);
-                            if geo.lens_vignette != 0.0 {
+                            if geo.has_lens_gain() {
                                 let g = geo.lens_gain(x + ctx.x0, y + ctx.y0);
                                 c.map(|v| v * g)
                             } else {
@@ -939,6 +947,22 @@ impl Gpu {
             ],
             outr: [ox, oy, full_ow, full_oh],
             offs2: [pl.e1, pl.e2, 0, 0],
+            lens0: [geo.pdist[0], geo.pdist[1], geo.pdist[2], geo.pdist[3]],
+            lens1: [
+                geo.pdist[4],
+                geo.pr_scale,
+                geo.pfit,
+                (geo.pdist != [1.0, 0.0, 0.0, 0.0, 0.0] || geo.ptca != [[1.0, 0.0, 0.0]; 2]) as u32
+                    as f32,
+            ],
+            lens2: [geo.ptca[0][0], geo.ptca[0][1], geo.ptca[0][2], geo.pv_scale],
+            lens3: [
+                geo.ptca[1][0],
+                geo.ptca[1][1],
+                geo.ptca[1][2],
+                geo.pv_amount,
+            ],
+            lens4: [geo.pvig[0], geo.pvig[1], geo.pvig[2], 0.0],
         };
         self.queue
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));

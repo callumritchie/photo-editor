@@ -134,6 +134,7 @@ struct ChoiceSpec: Codable, Hashable {
     let key: String
     let label: String
     let section: String
+    let subsection: String?
     let options: [[String]]
 }
 

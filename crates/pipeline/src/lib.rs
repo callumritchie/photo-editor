@@ -29,8 +29,8 @@ pub mod tone;
 pub mod wb;
 
 pub use settings::{
-    Crop, Demosaic, GradeWheel, Grading, Grain, Hsl, LensCorrection, NoiseReduction, Settings,
-    Sharpening, Transform, Treatment, Vignette, WhiteBalance, HUE_BANDS, PROCESS_VERSION,
+    Crop, Demosaic, GradeWheel, Grading, Grain, Hsl, LensCorrection, NoiseReduction, ProfileMode,
+    Settings, Sharpening, Transform, Treatment, Vignette, WhiteBalance, HUE_BANDS, PROCESS_VERSION,
 };
 
 pub use pe_colour::ColorSpace;
@@ -222,7 +222,7 @@ fn scene_stage_in(
     let scene = render_scene_in(frame, settings, ctx, globals)?;
     let (w, h) = (scene.width, scene.height);
     let mut data = scene.data;
-    let geo = geometry::GeometryParams::new(settings, ctx.full_w, ctx.full_h, frame.orientation);
+    let geo = geometry::GeometryParams::for_frame(settings, frame, ctx.full_w, ctx.full_h);
     let mp = masks::MaskParams::new(&settings.masks, &settings.rasters, geo.frame_w, geo.frame_h);
     let mask_dehaze = settings
         .masks
@@ -692,8 +692,8 @@ pub fn render_scene_in(
     let gain = settings.exposure.exp2();
 
     let mut data = cam;
-    let geo = geometry::GeometryParams::new(settings, ctx.full_w, ctx.full_h, frame.orientation);
-    let lens = geo.lens_vignette != 0.0;
+    let geo = geometry::GeometryParams::for_frame(settings, frame, ctx.full_w, ctx.full_h);
+    let lens = geo.has_lens_gain();
     data.par_chunks_mut(frame.width * 3)
         .enumerate()
         .for_each(|(y, row)| {
@@ -848,6 +848,7 @@ mod tests {
             xyz_to_cam: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             orientation: 1,
             scale: 1.0,
+            lens: None,
         };
         let s = Settings::default();
         let draft = render_draft(&frame, &s).unwrap();

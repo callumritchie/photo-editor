@@ -194,6 +194,7 @@ fn cases() -> Vec<(&'static str, Settings)> {
                     vignetting: 50.0,
                     ca_red_cyan: 80.0,
                     ca_blue_yellow: -60.0,
+                    ..Default::default()
                 },
                 dehaze: 20.0,
                 noise_reduction: pe_pipeline::NoiseReduction {
@@ -208,6 +209,17 @@ fn cases() -> Vec<(&'static str, Settings)> {
         (
             "masks: local noise reduction, dehaze, sharpness",
             masks_case_c(),
+        ),
+        (
+            "lens profile",
+            Settings {
+                lens: pe_pipeline::LensCorrection {
+                    profile: pe_pipeline::ProfileMode::On,
+                    profile_vignetting: 150.0,
+                    ..Default::default()
+                },
+                ..Settings::default()
+            },
         ),
         (
             "black & white, grading",
@@ -255,6 +267,8 @@ fn gpu_matches_cpu_reference() {
         return;
     };
     eprintln!("GPU: {}", gpu.name());
+    let mut profiled = 0;
+    let n_samples = samples().len();
     for path in samples() {
         let frame = pe_raw::decode_file(&path).unwrap();
         let preview = prepare_preview(&frame, 1024);
@@ -264,7 +278,16 @@ fn gpu_matches_cpu_reference() {
             let cpu = render(&preview, &s).unwrap();
             // Every case must visibly change the picture, or a feature that silently did nothing on
             // both paths would pass.
-            if name != "default" && (cpu.width, cpu.height) == (reference.width, reference.height) {
+            // The lens-profile case changes only photos whose lens is in the database.
+            let unprofiled = name == "lens profile"
+                && pe_pipeline::geometry::profile_for(&s, &preview).is_none();
+            if name == "lens profile" && !unprofiled {
+                profiled += 1;
+            }
+            if name != "default"
+                && !unprofiled
+                && (cpu.width, cpu.height) == (reference.width, reference.height)
+            {
                 let to8 = |v: f32| (v * 255.0 + 0.5) as u8;
                 let change = cpu
                     .data
@@ -321,6 +344,10 @@ fn gpu_matches_cpu_reference() {
             );
         }
     }
+    assert!(
+        n_samples == 0 || profiled > 0,
+        "no sample photo matched a lens profile"
+    );
 }
 
 fn comp(mode: Combine, invert: bool, shape: Shape) -> MaskComponent {

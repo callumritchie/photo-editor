@@ -10,6 +10,15 @@ extension PreviewImage {
         return CGSize(width: Int(w), height: Int(h))
     }
 
+    /// The photo's recorded lens and its matched profile, if any.
+    func lensProfile() -> (lens: String?, profile: String?) {
+        struct Info: Decodable { let lens: String?; let profile: String? }
+        guard let p = pe_image_lens_profile(handlePointer) else { return (nil, nil) }
+        defer { pe_string_free(p) }
+        let info = try? JSONDecoder().decode(Info.self, from: Data(bytes: p, count: strlen(p)))
+        return (info?.lens, info?.profile)
+    }
+
     /// The full-resolution output rectangle at 1:1.
     func renderRegion(_ settings: DevelopSettings, _ r: CGRect) -> NSImage? {
         var w: UInt32 = 0, h: UInt32 = 0

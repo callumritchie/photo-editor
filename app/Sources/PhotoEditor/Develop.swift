@@ -206,7 +206,11 @@ struct DevelopPanel: View {
     @State private var expanded: Set<String> = Set(
         ProcessInfo.processInfo.environment["PE_PANEL_SECTIONS"]?.split(separator: ",").map(String.init)
             ?? ["Tone", "Presence"])
-    @State private var tabs: [String: String] = [:]
+    // PE_PANEL_TAB="Geometry=Lens" opens a tab (snapshots).
+    @State private var tabs: [String: String] = {
+        guard let v = ProcessInfo.processInfo.environment["PE_PANEL_TAB"], let i = v.firstIndex(of: "=") else { return [:] }
+        return [String(v[..<i]): String(v[v.index(after: i)...])]
+    }()
 
     private let schema = DevelopSchema.shared
 
@@ -340,16 +344,18 @@ struct DevelopPanel: View {
         .controlSize(.small)
     }
 
+    private func choicePicker(_ c: ChoiceSpec) -> some View {
+        Picker(c.label, selection: Binding(
+            get: { model.settings.string(c.key) ?? c.options.first?.first ?? "" },
+            set: { v in model.settings.setString(c.key, v); model.requestRender(); model.commit() })) {
+            ForEach(c.options, id: \.self) { o in Text(o.last ?? "").tag(o.first ?? "") }
+        }
+        .pickerStyle(.segmented)
+    }
+
     @ViewBuilder private func paramSection(_ name: String, _ params: [ParamSpec]) -> some View {
         if name == "Geometry" { cropControls() }
-        ForEach(schema.choices.filter { $0.section == name }, id: \.key) { c in
-            Picker(c.label, selection: Binding(
-                get: { model.settings.string(c.key) ?? c.options.first?.first ?? "" },
-                set: { v in model.settings.setString(c.key, v); model.requestRender(); model.commit() })) {
-                ForEach(c.options, id: \.self) { o in Text(o.last ?? "").tag(o.first ?? "") }
-            }
-            .pickerStyle(.segmented)
-        }
+        ForEach(schema.choices.filter { $0.section == name && $0.subsection == nil }, id: \.key) { choicePicker($0) }
         let subs = params.compactMap(\.subsection).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
         if !subs.isEmpty {
             let current = tabs[name] ?? subs[0]
@@ -358,6 +364,15 @@ struct DevelopPanel: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            if current == "Lens", let info = model.preview?.lensProfile() {
+                Text(info.profile.map { "Profile: \($0)" }
+                     ?? info.lens.map { "No profile for \($0)" } ?? "Lens not recorded")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .help("Lens profiles come from the Lensfun database (CC BY-SA 3.0)")
+            }
+            ForEach(schema.choices.filter { $0.section == name && $0.subsection == current }, id: \.key) { choicePicker($0) }
             ForEach(params.filter { $0.subsection == current }, id: \.key) { p in
                 ParamSlider(spec: p, value: binding(p), onCommit: { model.commit() })
             }

@@ -97,6 +97,18 @@ pub struct RawFrame {
     /// Sensor pixels per frame pixel along each axis: 1 for a decoded raw, more for reduced
     /// previews. Pixel-scale effects (sharpening radius) use it to look alike at any size.
     pub scale: f32,
+    /// Lens and shooting parameters, when recorded (for lens profiles).
+    pub lens: Option<LensInfo>,
+}
+
+/// The lens a photo was taken with.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LensInfo {
+    pub name: String,
+    /// Millimetres; 0 when unknown.
+    pub focal_length: f32,
+    /// f-number; 0 when unknown.
+    pub aperture: f32,
 }
 
 impl RawFrame {
@@ -113,6 +125,7 @@ impl RawFrame {
             xyz_to_cam: self.xyz_to_cam,
             orientation: self.orientation,
             scale: self.scale,
+            lens: self.lens.clone(),
         }
     }
 }
@@ -120,7 +133,15 @@ impl RawFrame {
 /// Decode a raw file from disk.
 pub fn decode_file(path: impl AsRef<Path>) -> Result<RawFrame, RawError> {
     let img = rawler::decode_file(path.as_ref()).map_err(|e| RawError::Decoder(e.to_string()))?;
-    from_rawler(img)
+    let mut frame = from_rawler(img)?;
+    frame.lens = meta::raw_metadata(path.as_ref()).ok().and_then(|m| {
+        Some(LensInfo {
+            name: m.lens?,
+            focal_length: m.focal_length.unwrap_or(0.0) as f32,
+            aperture: m.f_number.unwrap_or(0.0) as f32,
+        })
+    });
+    Ok(frame)
 }
 
 fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
@@ -229,6 +250,7 @@ fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
         xyz_to_cam,
         orientation: orientation_code(&img.orientation),
         scale: 1.0,
+        lens: None,
     })
 }
 

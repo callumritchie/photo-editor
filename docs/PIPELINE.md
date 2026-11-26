@@ -22,7 +22,7 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | 10 | Output | `lib.rs`, `tone.rs` | Rec.2020 → linear sRGB; out-of-gamut colours desaturated towards their luminance; sRGB transfer function |
 | 11 | Point curve | `tone.rs` | Monotone cubic (Fritsch & Carlson 1980) through user points on encoded 0–255 values |
 | 12 | Orientation | `orient.rs` | EXIF orientation codes 1–8 (rotate/flip) |
-| 12b | Geometry | `geometry.rs` | Each output pixel is mapped back through one inverse transform: crop (fractions of the corrected frame) → straighten (rotation about the centre) → perspective (homography, Vertical/Horizontal tilt, Scale) → orientation → radial lens distortion (k₁ r², r relative to the half-diagonal) → per-channel radial scale for lateral chromatic aberration; sampled bilinearly, black outside the frame. Done after all per-pixel processing on both CPU and GPU. Lens vignetting is a radial gain (stops at the corners) in the scene stage |
+| 12b | Geometry | `geometry.rs` | Each output pixel is mapped back through one inverse transform: crop (fractions of the corrected frame) → straighten (rotation about the centre) → perspective (homography, Vertical/Horizontal tilt, Scale) → orientation → radial lens distortion (k₁ r², r relative to the half-diagonal) → per-channel radial scale for lateral chromatic aberration → lens profile (zoom to fill, then the profile's distortion and per-channel TCA, see `crates/lens`); sampled bilinearly, black outside the frame. Done after all per-pixel processing on both CPU and GPU. Lens vignetting (manual: stops at the corners; profile: divide by `1 + k₁r² + k₂r⁴ + k₃r⁶` raised to the amount) is a radial gain in the scene stage. The profile is found by matching the photo's camera and recorded lens name against the Lensfun database (numbers in the database name must all appear in the recorded name; version marks must agree; the mount must fit), interpolated linearly between calibrated focal lengths and, for vignetting, apertures in stops (farthest focus distance). The fill zoom is the widest view whose border still samples inside the photo |
 | 13 | Effects | `effects.rs` | In output coordinates normalised to the frame. **Vignette:** distance with roundness (ellipse fitted to the frame, towards a circle, or a p-norm rounded rectangle), smoothstep between Midpoint and Feather; darkens (sparing highlights if asked) or lightens towards white. **Grain:** two octaves of hashed value noise (cell size a fraction of the short side, mixed by Roughness), applied as a midtone-weighted gain |
 
 ## Settings (`pe settings` prints the defaults)
@@ -39,7 +39,7 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | `grain` | `amount`, `size`, `roughness`: 0…100 | 0, 25, 50 |
 | `crop` | `left`, `top`, `right`, `bottom` (fractions 0…1), `angle` −45…45° | full frame, 0 |
 | `transform` | `vertical`, `horizontal` −100…100, `scale` 50…150 | 0, 0, 100 |
-| `lens` | `distortion`, `vignetting`, `caRedCyan`, `caBlueYellow`: −100…100 | 0 |
+| `lens` | `profile`: `off` / `on`; `profileDistortion`, `profileVignetting`: 0…200 (%); `distortion`, `vignetting`, `caRedCyan`, `caBlueYellow`: −100…100 | off, 100, 100, 0 |
 | `noiseReduction` | `luminance`, `detail`, `color`: 0…100 | 0, 50, 0 |
 | `vibrance`, `saturation` | −100…100 | 0 |
 | `hsl` | `{"hue":[8], "saturation":[8], "luminance":[8]}`, each −100…100, bands red, orange, yellow, green, aqua, blue, purple, magenta | 0 |

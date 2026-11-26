@@ -1,0 +1,11 @@
+[package]
+name = "pe-lens"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Lens profile lookup: reads the Lensfun lens database (CC BY-SA 3.0 data, shipped separately) and interpolates calibrations"
+
+[dependencies]
+quick-xml.workspace = true

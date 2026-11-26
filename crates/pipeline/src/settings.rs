@@ -231,10 +231,22 @@ impl Default for Transform {
     }
 }
 
-/// Manual lens corrections, each -100..100.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+/// Whether the lens's calibrated profile (from the lens database) is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileMode {
+    #[default]
+    Off,
+    On,
+}
+
+/// Lens corrections: the lens profile (amounts 0..200 %) and manual corrections (-100..100).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LensCorrection {
+    pub profile: ProfileMode,
+    pub profile_distortion: f32,
+    pub profile_vignetting: f32,
     /// + corrects barrel distortion, - pincushion.
     pub distortion: f32,
     /// + brightens the corners (corrects lens fall-off).
@@ -242,6 +254,20 @@ pub struct LensCorrection {
     /// Lateral chromatic aberration: red/cyan and blue/yellow fringes.
     pub ca_red_cyan: f32,
     pub ca_blue_yellow: f32,
+}
+
+impl Default for LensCorrection {
+    fn default() -> Self {
+        Self {
+            profile: ProfileMode::Off,
+            profile_distortion: 100.0,
+            profile_vignetting: 100.0,
+            distortion: 0.0,
+            vignetting: 0.0,
+            ca_red_cyan: 0.0,
+            ca_blue_yellow: 0.0,
+        }
+    }
 }
 
 /// Current rendering algorithm generation.
@@ -403,6 +429,8 @@ impl Settings {
         ] {
             *x = x.clamp(-100.0, 100.0);
         }
+        l.profile_distortion = l.profile_distortion.clamp(0.0, 200.0);
+        l.profile_vignetting = l.profile_vignetting.clamp(0.0, 200.0);
         for m in &mut self.masks {
             m.amount = m.amount.clamp(0.0, 100.0);
             let a = &mut m.adjust;

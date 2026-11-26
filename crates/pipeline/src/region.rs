@@ -116,7 +116,7 @@ pub fn crop_frame(frame: &RawFrame, x0: usize, y0: usize, w: usize, h: usize) ->
 pub fn plan_region(frame: &RawFrame, settings: &Settings, out: [usize; 4]) -> ([usize; 4], Region) {
     let (fw, fh) = (frame.width, frame.height);
     let s = settings.clone().clamped();
-    let geo = crate::geometry::GeometryParams::new(&s, fw, fh, frame.orientation);
+    let geo = crate::geometry::GeometryParams::for_frame(&s, frame, fw, fh);
     let mut q = geo;
     if !q.active {
         q.out_w = q.frame_w;
@@ -202,6 +202,7 @@ mod tests {
             xyz_to_cam: [[0.9, -0.2, -0.05], [-0.3, 1.2, 0.1], [0.0, 0.1, 0.8]],
             orientation,
             scale: 1.0,
+            lens: None,
         }
     }
 

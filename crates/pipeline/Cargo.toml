@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 pe-raw.workspace = true
 pe-colour.workspace = true
+pe-lens.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 serde.workspace = true

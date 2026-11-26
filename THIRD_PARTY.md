@@ -16,6 +16,18 @@
 | [uuid](https://github.com/uuid-rs/uuid) | Record identifiers | MIT / Apache-2.0 |
 | [tempfile](https://github.com/Stebalien/tempfile) | Tests | MIT / Apache-2.0 |
 | [serde](https://github.com/serde-rs/serde), [serde_json](https://github.com/serde-rs/json) | Settings files, fixtures manifest | MIT / Apache-2.0 |
+| [quick-xml](https://github.com/tafia/quick-xml) | Reading the lens database | MIT |
+
+## Data
+
+| Data | Use | Licence |
+|---|---|---|
+| [Lensfun](https://github.com/lensfun/lensfun) lens database, in `data/lensfun/` (unmodified) | Lens profile corrections (distortion, chromatic aberration, vignetting) | [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), © the Lensfun contributors; see `data/lensfun/README.md` |
+
+The lens database is data read at run time and shipped beside the program (in the app bundle's
+`Resources/lensfun`), under its own licence; it is not part of the GPL-licensed source code. This
+project uses none of Lensfun's code: `crates/lens` is our own reader, written from the database's
+documented format.
 
 Sample raw files (downloaded on demand, not distributed with this repository) come from [raw.pixls.us](https://raw.pixls.us/). Only
 files marked CC0 1.0 (public domain dedication) are used. See `fixtures/samples.json` for the exact files and checksums.

@@ -20,6 +20,7 @@ pe-export = { path = "crates/export" }
 pe-gpu = { path = "crates/gpu" }
 pe-ffi = { path = "crates/ffi" }
 pe-develop = { path = "crates/develop" }
+pe-lens = { path = "crates/lens" }
 rawler = "0.8"
 tiff = "0.11"
 rayon = "1"
@@ -38,6 +39,7 @@ wgpu = "30.0.2"
 pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 kamadak-exif = "0.6"
+quick-xml = "0.37"
 
 [profile.dev.package."*"]
 opt-level = 3   # keep dependencies (decoders) fast in debug builds
