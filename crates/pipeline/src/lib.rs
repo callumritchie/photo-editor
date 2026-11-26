@@ -22,6 +22,7 @@ pub mod local;
 pub mod look;
 pub mod masks;
 pub mod orient;
+pub mod select;
 pub mod settings;
 pub mod tone;
 pub mod wb;

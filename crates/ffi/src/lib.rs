@@ -585,6 +585,8 @@ pub struct PeImage {
     preview: pe_raw::RawFrame,
     as_shot: Option<(f32, f32)>,
     gpu: Option<pe_gpu::GpuFrame>,
+    /// Mask rasters available to this photo's masks (subject / sky selections).
+    rasters: Mutex<pe_pipeline::masks::Rasters>,
 }
 
 /// The process-wide GPU, initialised on first use (`None` when unavailable or `PE_NO_GPU` is set).
@@ -667,6 +669,105 @@ pub unsafe extern "C" fn pe_catalog_library_json(
     }
 }
 
+/// Store an 8-bit grey mask raster (`w` x `h`, fractions of the oriented frame) for a photo.
+/// Returns `{"id": "<uuid>"}` or `{"error": ...}`.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_save_raster(
+    h: *mut PeCatalog,
+    image_id: i64,
+    w: u32,
+    hh: u32,
+    data: *const u8,
+    len: usize,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    if data.is_null() {
+        return error_out("no data");
+    }
+    let bytes = std::slice::from_raw_parts(data, len);
+    match c.inner.lock().unwrap().save_raster(image_id, w, hh, bytes) {
+        Ok(id) => json_out(&serde_json::json!({ "id": id })),
+        Err(e) => error_out(e),
+    }
+}
+
+/// Give the live preview the rasters that photo `image_id`'s masks refer to.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_attach_rasters(
+    img: *mut PeImage,
+    h: *mut PeCatalog,
+    image_id: i64,
+) -> bool {
+    let (Some(img), Some(c)) = (img.as_ref(), catalog(h)) else {
+        return false;
+    };
+    match c.inner.lock().unwrap().render_settings(image_id) {
+        Ok(s) => {
+            *img.rasters.lock().unwrap() = s.rasters;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Add one raster (8-bit grey) to the live preview under `id` (after a new selection).
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_add_raster(
+    img: *mut PeImage,
+    id: *const c_char,
+    w: u32,
+    hh: u32,
+    data: *const u8,
+    len: usize,
+) -> bool {
+    let (Some(img), Some(id)) = (img.as_ref(), str_in(id)) else {
+        return false;
+    };
+    if data.is_null() || len != (w as usize) * (hh as usize) {
+        return false;
+    }
+    let bytes = std::slice::from_raw_parts(data, len);
+    let raster = pe_pipeline::masks::Raster {
+        width: w as usize,
+        height: hh as usize,
+        data: bytes.iter().map(|v| *v as f32 / 255.0).collect(),
+    };
+    let mut r = img.rasters.lock().unwrap();
+    let mut map = (**r).clone();
+    map.insert(id.to_string(), raster);
+    *r = std::sync::Arc::new(map);
+    true
+}
+
+/// Select Sky on the preview (default rendering, oriented, uncropped). Returns an 8-bit grey raster
+/// (free with `pe_bytes_free(p, w*h)`), or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_select_sky(
+    img: *mut PeImage,
+    w: *mut u32,
+    hh: *mut u32,
+) -> *mut u8 {
+    let Some(img) = img.as_ref() else {
+        return ptr::null_mut();
+    };
+    let Ok(out) = pe_pipeline::render(&img.preview, &pe_pipeline::Settings::default()) else {
+        return ptr::null_mut();
+    };
+    let r = pe_pipeline::select::select_sky(&out.data, out.width, out.height);
+    if !w.is_null() {
+        *w = r.width as u32;
+    }
+    if !hh.is_null() {
+        *hh = r.height as u32;
+    }
+    bytes_out(
+        r.data.iter().map(|v| (v * 255.0 + 0.5) as u8).collect(),
+        ptr::null_mut(),
+    )
+}
+
 /// Default export settings as JSON.
 #[no_mangle]
 pub extern "C" fn pe_export_defaults_json() -> *mut c_char {
@@ -731,6 +832,7 @@ pub unsafe extern "C" fn pe_image_open(path: *const c_char, long_edge: u32) -> *
         preview,
         as_shot,
         gpu,
+        rasters: Mutex::new(Default::default()),
     }))
 }
 
@@ -768,11 +870,12 @@ pub unsafe extern "C" fn pe_image_render(
     let Some(img) = h.as_ref() else {
         return ptr::null_mut();
     };
-    let settings: pe_pipeline::Settings =
+    let mut settings: pe_pipeline::Settings =
         match str_in(settings_json).map(serde_json::from_str).transpose() {
             Ok(s) => s.unwrap_or_default(),
             Err(_) => return ptr::null_mut(),
         };
+    settings.rasters = img.rasters.lock().unwrap().clone();
     if let (Some(g), Some(frame)) = (gpu(), &img.gpu) {
         if let Ok((ow, oh, rgba)) = g.render(frame, &settings) {
             if !w.is_null() {

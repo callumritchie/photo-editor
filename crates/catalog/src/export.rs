@@ -45,7 +45,7 @@ impl Catalog {
             )?;
             out.push(ExportItem {
                 source: PathBuf::from(img.path),
-                settings: self.develop_settings(id)?,
+                settings: self.render_settings(id)?,
                 meta,
             });
         }

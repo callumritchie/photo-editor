@@ -864,3 +864,77 @@ mod erased {
         }
     }
 }
+
+impl Catalog {
+    // ---- mask rasters -----------------------------------------------------------------------------
+
+    /// Store a mask raster (8-bit grey, `width` x `height`) for a photo; returns its id.
+    pub fn save_raster(
+        &mut self,
+        image_id: i64,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Result<String> {
+        if data.len() != (width as usize) * (height as usize) || width == 0 || height == 0 {
+            return Err(invalid("raster size does not match its data"));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO mask_rasters (id, image_id, width, height, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, image_id, width, height, data, now_ms()],
+        )?;
+        Ok(id)
+    }
+
+    /// Rasters by id (missing ids are skipped).
+    pub fn rasters(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, pe_pipeline::masks::Raster>> {
+        let mut out = std::collections::HashMap::new();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT width, height, data FROM mask_rasters WHERE id = ?1")?;
+        for id in ids {
+            let row: Option<(i64, i64, Vec<u8>)> = stmt
+                .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?;
+            if let Some((w, h, d)) = row {
+                out.insert(
+                    id.clone(),
+                    pe_pipeline::masks::Raster {
+                        width: w as usize,
+                        height: h as usize,
+                        data: d.iter().map(|v| *v as f32 / 255.0).collect(),
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Develop settings with the rasters their masks refer to attached (for rendering).
+    pub fn render_settings(&self, image_id: i64) -> Result<Settings> {
+        let mut s = self.develop_settings(image_id)?;
+        self.attach_rasters(&mut s)?;
+        Ok(s)
+    }
+
+    /// Load the rasters `s`'s masks refer to into `s.rasters`.
+    pub fn attach_rasters(&self, s: &mut Settings) -> Result<()> {
+        let ids: Vec<String> = s
+            .masks
+            .iter()
+            .flat_map(|m| m.components.iter())
+            .filter_map(|c| match &c.shape {
+                pe_pipeline::masks::Shape::Raster { raster_id } => Some(raster_id.clone()),
+                _ => None,
+            })
+            .collect();
+        if !ids.is_empty() {
+            s.rasters = std::sync::Arc::new(self.rasters(&ids)?);
+        }
+        Ok(())
+    }
+}

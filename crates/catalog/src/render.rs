@@ -88,7 +88,8 @@ impl Catalog {
         let Some(img) = self.image(id)? else {
             return Ok(None);
         };
-        let (settings, digest, thumb_digest) = self.render_digests(id)?;
+        let (mut settings, digest, thumb_digest) = self.render_digests(id)?;
+        self.attach_rasters(&mut settings)?;
         Ok(Some(RenderJob {
             id,
             path: PathBuf::from(img.path),

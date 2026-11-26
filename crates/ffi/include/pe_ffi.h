@@ -60,6 +60,12 @@ PeImage *pe_image_open(const char *path, uint32_t long_edge);
 void pe_image_close(PeImage *h);
 char *pe_image_info_json(PeImage *h);
 uint8_t *pe_image_render(PeImage *h, const char *settings_json, uint32_t *w, uint32_t *hh);
+/* Mask rasters (subject / sky selections): 8-bit grey, fractions of the oriented, uncropped frame. */
+char *pe_catalog_save_raster(PeCatalog *h, int64_t image_id, uint32_t w, uint32_t hh, const uint8_t *data, size_t len);
+bool pe_image_attach_rasters(PeImage *img, PeCatalog *h, int64_t image_id);
+bool pe_image_add_raster(PeImage *img, const char *id, uint32_t w, uint32_t hh, const uint8_t *data, size_t len);
+uint8_t *pe_image_select_sky(PeImage *img, uint32_t *w, uint32_t *hh);
+
 /* "Apple M1 (Metal)" or "CPU": the renderer used by pe_image_render. */
 char *pe_renderer_name(void);
 

@@ -10,7 +10,7 @@
 
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 const V1: &str = r#"
 CREATE TABLE meta (
@@ -183,6 +183,19 @@ CREATE TABLE image_keywords (
 CREATE INDEX image_keywords_keyword ON image_keywords (keyword_id);
 "#;
 
+/// v5: mask rasters (subject / sky selections) referenced by masks in develop settings.
+const V5: &str = r#"
+CREATE TABLE mask_rasters (
+    id         TEXT PRIMARY KEY,         -- UUID, referenced from settings JSON
+    image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    width      INTEGER NOT NULL,
+    height     INTEGER NOT NULL,
+    data       BLOB NOT NULL,            -- 8-bit grey, row-major, fractions of the oriented frame
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX mask_rasters_image ON mask_rasters (image_id);
+"#;
+
 /// Connection-level settings applied on every open.
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -222,6 +235,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V4)?;
         tx.pragma_update(None, "user_version", 4)?;
+        tx.commit()?;
+    }
+    if version < 5 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V5)?;
+        tx.pragma_update(None, "user_version", 5)?;
         tx.commit()?;
     }
     Ok(())
