@@ -115,6 +115,9 @@ pub enum Shape {
     },
     Raster {
         raster_id: String,
+        /// What it selects ("Subject", "Sky"), for display.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        label: String,
     },
 }
 
@@ -471,7 +474,7 @@ impl MaskParams {
                             Shape::Brush { strokes } => {
                                 PreparedShape::Raster(brush_raster_cached(strokes, aspect))
                             }
-                            Shape::Raster { raster_id } => match rasters.get(raster_id) {
+                            Shape::Raster { raster_id, .. } => match rasters.get(raster_id) {
                                 Some(r) => PreparedShape::Raster(Arc::new(r.clone())),
                                 None => PreparedShape::Nothing,
                             },

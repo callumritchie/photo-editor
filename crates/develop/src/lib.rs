@@ -503,6 +503,30 @@ pub fn params() -> &'static [ParamSpec] {
     &P
 }
 
+/// Local adjustment sliders of a mask; keys are relative to the mask's `adjust` object.
+pub fn mask_params() -> Vec<ParamSpec> {
+    let m = |key: &str, label: &str| spec(key, label, Group::Masks, "Mask");
+    vec![
+        m("temperature", "Temperature"),
+        m("tint", "Tint"),
+        ParamSpec {
+            min: -4.0,
+            max: 4.0,
+            step: 0.05,
+            precision: 2,
+            ..m("exposure", "Exposure")
+        },
+        m("contrast", "Contrast"),
+        m("highlights", "Highlights"),
+        m("shadows", "Shadows"),
+        m("whites", "Whites"),
+        m("blacks", "Blacks"),
+        m("texture", "Texture"),
+        m("clarity", "Clarity"),
+        m("saturation", "Saturation"),
+    ]
+}
+
 pub fn temperature_spec() -> ParamSpec {
     ParamSpec {
         min: 2000.0,

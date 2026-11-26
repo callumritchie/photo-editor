@@ -5,7 +5,7 @@ import SwiftUI
 @MainActor
 final class DevelopModel: ObservableObject {
     let item: ImageItem
-    private let core: Core
+    let core: Core
     private let onCommitted: (Int64) -> Void
 
     @Published var settings = DevelopSettings()
@@ -19,9 +19,22 @@ final class DevelopModel: ObservableObject {
         didSet { if cropping != oldValue { requestRender() } }
     }
     @Published var cropAspect = CropAspect.presets[0]
+
+    // Masking: the selected mask (and component) is edited on the uncropped frame with an overlay.
+    @Published var selectedMask: Int? { didSet { if selectedMask != oldValue { requestRender() } } }
+    @Published var activeComponent = 0
+    @Published var showOverlay = true { didSet { requestRender() } }
+    @Published private(set) var maskOverlay: NSImage?
+    @Published var brushSize = 0.03
+    @Published var brushFeather = 0.5
+    @Published var brushFlow = 1.0
+    @Published var brushErase = false
+    @Published var pickingColor = false
+    @Published var busy: String?
+    var maskEditing: Bool { selectedMask != nil }
     @Published var error: String?
 
-    private var preview: PreviewImage?
+    private(set) var preview: PreviewImage?
     private var rendering = false
     private var pending = false
 
@@ -68,7 +81,14 @@ final class DevelopModel: ObservableObject {
         guard isRaw else { loading = false; return }
         let path = item.path
         preview = await Task.detached(priority: .userInitiated) { PreviewImage(path: path, longEdge: 2048) }.value
+        preview?.attachRasters(core: core, imageId: item.id)
         loading = false
+        // Development aids for UI snapshots: PE_SELECT_MASK=<index>, PE_ADD_MASK=subject|sky|radial|...
+        let env = ProcessInfo.processInfo.environment
+        if let i = Int(env["PE_SELECT_MASK"] ?? ""), settings.masks.indices.contains(i) { selectedMask = i }
+        if let k = env["PE_ADD_MASK"], let kind = MaskKind.allCases.first(where: { $0.rawValue.lowercased().contains(k) }) {
+            addMask(kind)
+        }
         requestRender()
     }
 
@@ -79,11 +99,16 @@ final class DevelopModel: ObservableObject {
         rendering = true
         var s = settings
         if cropping { s.crop = .full }
+        if maskEditing { s = s.withoutGeometry }
+        let overlayIndex = (maskEditing && showOverlay) ? selectedMask : nil
         Task {
             let t0 = Date()
-            let img = await Task.detached(priority: .userInitiated) { preview.render(s) }.value
+            let (img, overlay) = await Task.detached(priority: .userInitiated) {
+                (preview.render(s), overlayIndex.flatMap { preview.maskOverlay(s, index: $0) })
+            }.value
             lastRenderMs = Int(Date().timeIntervalSince(t0) * 1000)
             if let img { image = img }
+            maskOverlay = overlay
             rendering = false
             if pending { pending = false; requestRender() }
         }
@@ -160,6 +185,7 @@ struct DevelopPanel: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 section("White Balance") { whiteBalance }
+                collapsible("Masks") { MaskPanel(model: model) }
                 ForEach(sectionNames, id: \.self) { name in
                     let params = schema.params.filter { $0.section == name }
                     if params.allSatisfy({ $0.when == nil || $0.when == model.settings.treatment }) {
@@ -351,7 +377,7 @@ struct ParamSlider: View {
     let onCommit: () -> Void
 
     private var formatted: String {
-        if spec.key == "temperature" { return "\(Int(value.rounded())) K" }
+        if spec.key == "temperature" && spec.group == "whiteBalance" { return "\(Int(value.rounded())) K" }
         if spec.hue { return "\(Int(value.rounded()))°" }
         return String(format: spec.min >= 0 ? "%.\(spec.precision)f" : "%+.\(spec.precision)f", value)
     }

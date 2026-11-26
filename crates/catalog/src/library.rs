@@ -928,7 +928,7 @@ impl Catalog {
             .iter()
             .flat_map(|m| m.components.iter())
             .filter_map(|c| match &c.shape {
-                pe_pipeline::masks::Shape::Raster { raster_id } => Some(raster_id.clone()),
+                pe_pipeline::masks::Shape::Raster { raster_id, .. } => Some(raster_id.clone()),
                 _ => None,
             })
             .collect();

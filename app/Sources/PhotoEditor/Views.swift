@@ -400,6 +400,9 @@ struct LoupeImage: View {
                 if let image = model.image ?? fallback {
                     Image(nsImage: image).resizable().scaledToFit()
                         .overlay {
+                            if model.maskEditing && !model.cropping && model.image != nil {
+                                MaskCanvas(model: model)
+                            }
                             if model.cropping && model.image != nil {
                                 CropOverlay(
                                     rect: Binding(get: { model.settings.crop },
@@ -438,7 +441,9 @@ struct LoupeImage: View {
         .focusEffectDisabled()
         .onAppear { focused = true }
         .onKeyPress(.escape) {
-            if model.cropping { model.cropping = false } else { state.mode = .grid }
+            if model.cropping { model.cropping = false }
+            else if model.maskEditing { model.selectedMask = nil; model.pickingColor = false }
+            else { state.mode = .grid }
             return .handled
         }
         .onKeyPress(.return) {

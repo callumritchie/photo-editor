@@ -481,6 +481,7 @@ pub extern "C" fn pe_develop_schema_json() -> *mut c_char {
         .collect();
     json_out(&serde_json::json!({
         "params": pe_develop::params(),
+        "maskParams": pe_develop::mask_params(),
         "choices": pe_develop::CHOICES,
         "temperature": pe_develop::temperature_spec(),
         "tint": pe_develop::tint_spec(),
@@ -739,6 +740,70 @@ pub unsafe extern "C" fn pe_image_add_raster(
     map.insert(id.to_string(), raster);
     *r = std::sync::Arc::new(map);
     true
+}
+
+/// One mask's values over the preview frame (oriented, uncropped), as 8-bit grey for an overlay.
+/// Free with `pe_bytes_free(p, w*h)`. NULL if the mask does not exist or is disabled.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_mask_overlay(
+    img: *mut PeImage,
+    settings_json: *const c_char,
+    index: u32,
+    w: *mut u32,
+    hh: *mut u32,
+) -> *mut u8 {
+    let Some(img) = img.as_ref() else {
+        return ptr::null_mut();
+    };
+    let Some(Ok(mut s)) = str_in(settings_json).map(serde_json::from_str::<pe_pipeline::Settings>)
+    else {
+        return ptr::null_mut();
+    };
+    s.rasters = img.rasters.lock().unwrap().clone();
+    match pe_pipeline::mask_overlay(&img.preview, &s, index as usize) {
+        Ok(Some((ow, oh, v))) => {
+            if !w.is_null() {
+                *w = ow as u32;
+            }
+            if !hh.is_null() {
+                *hh = oh as u32;
+            }
+            bytes_out(
+                v.iter().map(|x| (x * 255.0 + 0.5) as u8).collect(),
+                ptr::null_mut(),
+            )
+        }
+        _ => ptr::null_mut(),
+    }
+}
+
+/// OKLab colour (as colour-range masks see it) at frame fractions (fx, fy) into `out[3]`.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_pick_color(
+    img: *mut PeImage,
+    settings_json: *const c_char,
+    fx: f32,
+    fy: f32,
+    out: *mut f32,
+) -> bool {
+    let Some(img) = img.as_ref() else {
+        return false;
+    };
+    if out.is_null() {
+        return false;
+    }
+    let s: pe_pipeline::Settings = match str_in(settings_json).map(serde_json::from_str).transpose()
+    {
+        Ok(s) => s.unwrap_or_default(),
+        Err(_) => return false,
+    };
+    match pe_pipeline::pick_color(&img.preview, &s, fx, fy) {
+        Ok(lab) => {
+            std::slice::from_raw_parts_mut(out, 3).copy_from_slice(&lab);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Select Sky on the preview (default rendering, oriented, uncropped). Returns an 8-bit grey raster

@@ -489,6 +489,7 @@ fn masks_case_b() -> Settings {
             false,
             Shape::Raster {
                 raster_id: "subject".into(),
+                label: String::new(),
             },
         )],
         LocalAdjust {

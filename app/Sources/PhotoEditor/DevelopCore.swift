@@ -139,6 +139,7 @@ struct ChoiceSpec: Codable, Hashable {
 
 struct DevelopSchema: Codable {
     let params: [ParamSpec]
+    let maskParams: [ParamSpec]
     let choices: [ChoiceSpec]
     let temperature: ParamSpec
     let tint: ParamSpec
@@ -228,6 +229,7 @@ extension Core {
 /// A raw decoded once and reduced for fast re-rendering while sliders move.
 final class PreviewImage: @unchecked Sendable {
     private let handle: OpaquePointer
+    var handlePointer: OpaquePointer { handle }
     let asShotTemperature: Double?
     let asShotTint: Double?
     /// Preview size in sensor orientation.

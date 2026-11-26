@@ -65,6 +65,9 @@ char *pe_catalog_save_raster(PeCatalog *h, int64_t image_id, uint32_t w, uint32_
 bool pe_image_attach_rasters(PeImage *img, PeCatalog *h, int64_t image_id);
 bool pe_image_add_raster(PeImage *img, const char *id, uint32_t w, uint32_t hh, const uint8_t *data, size_t len);
 uint8_t *pe_image_select_sky(PeImage *img, uint32_t *w, uint32_t *hh);
+/* Mask overlay (8-bit grey over the oriented, uncropped preview frame) and colour picking (OKLab). */
+uint8_t *pe_image_mask_overlay(PeImage *img, const char *settings_json, uint32_t index, uint32_t *w, uint32_t *hh);
+bool pe_image_pick_color(PeImage *img, const char *settings_json, float fx, float fy, float *out_lab);
 
 /* "Apple M1 (Metal)" or "CPU": the renderer used by pe_image_render. */
 char *pe_renderer_name(void);

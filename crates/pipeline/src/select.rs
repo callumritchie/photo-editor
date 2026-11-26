@@ -1,9 +1,9 @@
 //! Automatic selections that produce mask rasters.
 //!
 //! **Sky** (this project's own heuristic; no trained model): on a reduced copy of the rendered
-//! picture, score each pixel for "sky-likeness" (bright, blue or neutral rather than warm, low local
-//! texture), grow a region from the top edge through sky-like pixels whose colour changes smoothly,
-//! then refine the edge with a guided filter whose guide is lightness, so it follows branches and
+//! picture, score each pixel for "sky-likeness" (bright, blue or neutral rather than warm, low texture
+//! over a 5x5 window), grow a region from the top edge through sky-like pixels whose colour changes smoothly,
+//! fill holes enclosed by it (cloud shading), then refine the edge with a guided filter whose guide is lightness, so it follows branches and
 //! rooflines. It works for ordinary daylight skies; night skies, sunsets with saturated colour and
 //! skies not touching the top edge are not found.
 
@@ -42,19 +42,22 @@ pub fn select_sky(rgb: &[f32], w: usize, h: usize) -> Raster {
         .map(|p| oklab_srgb([p[0], p[1], p[2]]))
         .collect();
     let n = sw * sh;
-    // Local texture: mean absolute lightness difference to the 4 neighbours.
-    let at = |x: usize, y: usize| lab[y * sw + x][0];
+    // Local texture: standard deviation of lightness over a 5x5 window (rock, foliage and buildings
+    // are textured at this scale; sky and clouds are not).
     let texture: Vec<f32> = (0..n)
         .map(|i| {
             let (x, y) = (i % sw, i / sw);
-            let l = at(x, y);
-            let nb = [
-                at(x.saturating_sub(1), y),
-                at((x + 1).min(sw - 1), y),
-                at(x, y.saturating_sub(1)),
-                at(x, (y + 1).min(sh - 1)),
-            ];
-            nb.iter().map(|v| (v - l).abs()).sum::<f32>() / 4.0
+            let (mut s1, mut s2, mut k) = (0.0f32, 0.0f32, 0.0f32);
+            for yy in y.saturating_sub(2)..(y + 3).min(sh) {
+                for xx in x.saturating_sub(2)..(x + 3).min(sw) {
+                    let l = lab[yy * sw + xx][0];
+                    s1 += l;
+                    s2 += l * l;
+                    k += 1.0;
+                }
+            }
+            let m = s1 / k;
+            (s2 / k - m * m).max(0.0).sqrt()
         })
         .collect();
     let score: Vec<f32> = (0..n)
@@ -63,7 +66,7 @@ pub fn select_sky(rgb: &[f32], w: usize, h: usize) -> Raster {
             let bright = smoothstep(0.45, 0.7, l);
             // Blue (b < 0) or near-neutral; penalise warm and green.
             let hue_ok = 1.0 - smoothstep(0.01, 0.06, b) * 1.0 - smoothstep(0.03, 0.08, -a) * 0.5;
-            let smooth = 1.0 - smoothstep(0.01, 0.05, texture[i]);
+            let smooth = 1.0 - smoothstep(0.008, 0.03, texture[i]);
             (bright * hue_ok.max(0.0) * smooth).clamp(0.0, 1.0)
         })
         .collect();
@@ -84,7 +87,7 @@ pub fn select_sky(rgb: &[f32], w: usize, h: usize) -> Raster {
                     + (lab[i][1] - lab[j][1]).powi(2)
                     + (lab[i][2] - lab[j][2]).powi(2))
                 .sqrt();
-                if d < 0.04 {
+                if d < 0.025 {
                     region[j] = 1.0;
                     queue.push_back(j);
                 }
@@ -101,6 +104,43 @@ pub fn select_sky(rgb: &[f32], w: usize, h: usize) -> Raster {
         }
         if y + 1 < sh {
             visit(i + sw);
+        }
+    }
+    // Fill holes (cloud shading, birds): anything not selected that cannot be reached from the bottom
+    // edge without crossing the selection is enclosed by sky.
+    let mut ground = vec![false; n];
+    let mut queue: VecDeque<usize> = (0..sw)
+        .map(|x| (sh - 1) * sw + x)
+        .filter(|&i| region[i] == 0.0)
+        .collect();
+    for &i in &queue {
+        ground[i] = true;
+    }
+    while let Some(i) = queue.pop_front() {
+        let (x, y) = (i % sw, i / sw);
+        let mut nb = Vec::with_capacity(4);
+        if x > 0 {
+            nb.push(i - 1);
+        }
+        if x + 1 < sw {
+            nb.push(i + 1);
+        }
+        if y > 0 {
+            nb.push(i - sw);
+        }
+        if y + 1 < sh {
+            nb.push(i + sw);
+        }
+        for j in nb {
+            if !ground[j] && region[j] == 0.0 {
+                ground[j] = true;
+                queue.push_back(j);
+            }
+        }
+    }
+    for i in 0..n {
+        if !ground[i] {
+            region[i] = 1.0;
         }
     }
     // Edge refinement guided by lightness.

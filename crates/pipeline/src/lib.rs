@@ -190,9 +190,18 @@ pub fn render(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderE
 
 /// Stages 1-5 and orientation: display-referred *linear* Rec.2020 (values may lie outside [0, 1] gamut
 /// in other spaces), with the point curve applied. Resizing and sharpening for export happen on this.
-pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
-    let settings = settings.clone().clamped();
-    let scene = render_scene(frame, &settings)?;
+/// Scene-linear image after detail, dehaze and the global local stage, with what later stages need.
+struct SceneStage {
+    data: Vec<f32>,
+    w: usize,
+    h: usize,
+    planes: local::LocalPlanes,
+    geo: geometry::GeometryParams,
+    mp: masks::MaskParams,
+}
+
+fn scene_stage(frame: &RawFrame, settings: &Settings) -> Result<SceneStage, RenderError> {
+    let scene = render_scene(frame, settings)?;
     let (w, h) = (scene.width, scene.height);
     let mut data = scene.data;
 
@@ -200,7 +209,7 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
     // computes it from the same scene pixels).
     let airlight =
         (settings.dehaze != 0.0).then(|| local::airlight(&local::airlight_samples(&data, w, h)));
-    let dp = detail::DetailParams::new(&settings, [0.0; 3], frame.scale);
+    let dp = detail::DetailParams::new(settings, [0.0; 3], frame.scale);
     if dp.enabled() {
         let noise = if dp.nr {
             // Measured without exposure (so exposure changes need no new measurement) and scaled:
@@ -218,15 +227,15 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
             &mut data,
             w,
             h,
-            &detail::DetailParams::new(&settings, noise, frame.scale),
+            &detail::DetailParams::new(settings, noise, frame.scale),
         );
     }
     if let Some(a) = airlight {
         local::dehaze(&mut data, w, h, settings.dehaze, a);
     }
-    let geo = geometry::GeometryParams::new(&settings, w, h, frame.orientation);
+    let geo = geometry::GeometryParams::new(settings, w, h, frame.orientation);
     let mp = masks::MaskParams::new(&settings.masks, &settings.rasters, geo.frame_w, geo.frame_h);
-    let planes = local::local_planes(&data, w, h, &settings, mp.needs_clarity, mp.needs_texture);
+    let planes = local::local_planes(&data, w, h, settings, mp.needs_clarity, mp.needs_texture);
     if let Some(gains) = &planes.gains {
         data.par_chunks_mut(3)
             .zip(gains.par_iter())
@@ -237,6 +246,133 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
             });
     }
 
+    Ok(SceneStage {
+        data,
+        w,
+        h,
+        planes,
+        geo,
+        mp,
+    })
+}
+
+/// One mask's values over the oriented, uncropped frame (for showing it as an overlay): (width,
+/// height, values 0..1). `None` if there is no such (enabled) mask.
+pub fn mask_overlay(
+    frame: &RawFrame,
+    settings: &Settings,
+    index: usize,
+) -> Result<Option<(usize, usize, Vec<f32>)>, RenderError> {
+    let settings = settings.clone().clamped();
+    // Only this mask matters; render without geometry so positions are frame positions.
+    let only: Vec<masks::Mask> = settings
+        .masks
+        .get(index)
+        .filter(|m| m.enabled)
+        .map(|m| masks::Mask {
+            enabled: true,
+            amount: 100.0,
+            ..m.clone()
+        })
+        .into_iter()
+        .collect();
+    if only.is_empty() {
+        return Ok(None);
+    }
+    let s = Settings {
+        masks: only,
+        ..settings.clone()
+    };
+    let st = scene_stage(frame, &s)?;
+    let Some(m) = st.mp.masks.first() else {
+        return Ok(None);
+    };
+    let params = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
+    let (w, h) = (st.w, st.h);
+    let mut vals = vec![0.0f32; w * h * 3];
+    vals.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            let i = (y * w + x) * 3;
+            let c = [st.data[i], st.data[i + 1], st.data[i + 2]];
+            let display = if st.mp.needs_display {
+                params.apply(c, REC2020_LUMA)
+            } else {
+                c
+            };
+            let (fx, fy) = masks::frame_position(x, y, w, h, st.geo.orientation);
+            let v = st.mp.value(m, fx, fy, display);
+            row[x * 3..x * 3 + 3].copy_from_slice(&[v, v, v]);
+        }
+    });
+    let (ow, oh, data) = if st.geo.orientation != 1 {
+        orient::apply(st.geo.orientation, w, h, &vals)
+    } else {
+        (w, h, vals)
+    };
+    Ok(Some((ow, oh, data.chunks(3).map(|p| p[0]).collect())))
+}
+
+/// OKLab of the pixel at frame fractions (fx, fy) as colour-range masks see it (after the global
+/// tone stage), for picking a colour.
+pub fn pick_color(
+    frame: &RawFrame,
+    settings: &Settings,
+    fx: f32,
+    fy: f32,
+) -> Result<[f32; 3], RenderError> {
+    let settings = settings.clone().clamped();
+    let s = Settings {
+        masks: Vec::new(),
+        ..settings.clone()
+    };
+    let st = scene_stage(frame, &s)?;
+    let (w, h) = (st.w, st.h);
+    let (fw, fh) = (st.geo.frame_w as f32, st.geo.frame_h as f32);
+    // Find the sensor pixel whose frame position is nearest (search via the inverse mapping).
+    let (px, py) = (fx.clamp(0.0, 1.0) * fw, fy.clamp(0.0, 1.0) * fh);
+    let (sw, sh) = (w as f32, h as f32);
+    let (sx, sy) = match st.geo.orientation {
+        2 => (sw - px, py),
+        3 => (sw - px, sh - py),
+        4 => (px, sh - py),
+        5 => (py, px),
+        6 => (py, sh - px),
+        7 => (sw - py, sh - px),
+        8 => (sw - py, px),
+        _ => (px, py),
+    };
+    let (x, y) = (
+        (sx.max(0.0) as usize).min(w - 1),
+        (sy.max(0.0) as usize).min(h - 1),
+    );
+    let params = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
+    // Average a small neighbourhood to avoid picking noise.
+    let mut acc = [0.0f32; 3];
+    let mut n = 0.0;
+    for yy in y.saturating_sub(2)..(y + 3).min(h) {
+        for xx in x.saturating_sub(2)..(x + 3).min(w) {
+            let i = (yy * w + xx) * 3;
+            let d = params.apply([st.data[i], st.data[i + 1], st.data[i + 2]], REC2020_LUMA);
+            for k in 0..3 {
+                acc[k] += d[k];
+            }
+            n += 1.0;
+        }
+    }
+    let mp = masks::MaskParams::new(&[], &Default::default(), 1, 1);
+    Ok(mp.oklab(acc.map(|v| v / n)))
+}
+
+pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
+    let settings = settings.clone().clamped();
+    let SceneStage {
+        mut data,
+        w,
+        h,
+        planes,
+        geo,
+        mp,
+    } = scene_stage(frame, &settings)?;
     let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks);
     let look_params = look::LookParams::new(&settings);
     // The point curve is defined on sRGB-encoded display values, independent of the output space.
