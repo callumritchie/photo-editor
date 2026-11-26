@@ -164,6 +164,45 @@ fn cases() -> Vec<(&'static str, Settings)> {
             },
         ),
         (
+            "crop, straighten, perspective",
+            Settings {
+                crop: pe_pipeline::Crop {
+                    left: 0.1,
+                    top: 0.15,
+                    right: 0.85,
+                    bottom: 0.9,
+                    angle: 7.5,
+                },
+                transform: pe_pipeline::Transform {
+                    vertical: 40.0,
+                    horizontal: -25.0,
+                    scale: 90.0,
+                },
+                vignette: pe_pipeline::Vignette {
+                    amount: -50.0,
+                    ..Default::default()
+                },
+                ..d.clone()
+            },
+        ),
+        (
+            "lens corrections",
+            Settings {
+                lens: pe_pipeline::LensCorrection {
+                    distortion: 60.0,
+                    vignetting: 50.0,
+                    ca_red_cyan: 80.0,
+                    ca_blue_yellow: -60.0,
+                },
+                dehaze: 20.0,
+                noise_reduction: pe_pipeline::NoiseReduction {
+                    luminance: 30.0,
+                    ..Default::default()
+                },
+                ..d.clone()
+            },
+        ),
+        (
             "black & white, grading",
             Settings {
                 treatment: pe_pipeline::Treatment::Monochrome,

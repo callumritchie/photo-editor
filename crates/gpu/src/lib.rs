@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use bytemuck::{Pod, Zeroable};
 use pe_colour::{ColorSpace, REC2020_TO_XYZ_D65};
-use pe_pipeline::{detail, effects, local, look, tone, wb, Settings, WhiteBalance};
+use pe_pipeline::{detail, effects, geometry, local, look, tone, wb, Settings, WhiteBalance};
 use pe_raw::{Layout, RawFrame};
 use wgpu::util::DeviceExt;
 
@@ -45,6 +45,11 @@ struct Params {
     haze2: [f32; 4],
     offs: [u32; 4],
     flags: [u32; 4],
+    geo0: [f32; 4],
+    geo1: [f32; 4],
+    geo2: [f32; 4],
+    geo3: [f32; 4],
+    geo4: [u32; 4],
 }
 
 /// Per-pass record for the generic kernels (matches `struct Pass` in the shader).
@@ -128,9 +133,11 @@ enum Kernel {
     Gauss,
     Sharpen,
     AtrousLevel,
+    Display,
+    Geometry,
 }
 
-const ENTRY_POINTS: [&str; 14] = [
+const ENTRY_POINTS: [&str; 16] = [
     "scene_pass",
     "downscale",
     "min_filter",
@@ -145,6 +152,8 @@ const ENTRY_POINTS: [&str; 14] = [
     "gauss",
     "sharpen",
     "atrous_level",
+    "display_pass",
+    "geometry_pass",
 ];
 
 /// A GPU device with the develop pipelines compiled.
@@ -455,27 +464,28 @@ impl Gpu {
         let (sev, hev) = tone::local_tone_amounts(s.shadows, s.highlights);
         let use_sh = s.shadows != 0.0 || s.highlights != 0.0;
         let (use_cl, use_tx) = (s.clarity != 0.0, s.texture != 0.0);
-        let orientation = if s.apply_orientation {
-            f.orientation
-        } else {
-            1
-        };
-        let (ow, oh) = if (5..=8).contains(&orientation) {
-            (f.height, f.width)
-        } else {
-            (f.width, f.height)
-        };
+        let geo =
+            geometry::GeometryParams::new(&s, f.width as usize, f.height as usize, f.orientation);
+        let orientation = geo.orientation;
+        let (ow, oh) = geo.output_size();
+        let (ow, oh) = (ow as u32, oh as u32);
 
         // Scene pixel from the kept camera data, exactly as the CPU path computes it.
         let fw = f.width as usize;
         let scene_at = |x: usize, y: usize| {
             let i = (y * fw + x) * 3;
-            pe_pipeline::scene_pixel(
+            let c = pe_pipeline::scene_pixel(
                 [f.host[i], f.host[i + 1], f.host[i + 2]],
                 wbm,
                 &to_work,
                 gain,
-            )
+            );
+            if geo.lens_vignette != 0.0 {
+                let g = geo.lens_gain(x, y);
+                c.map(|v| v * g)
+            } else {
+                c
+            }
         };
         let (wu, hu) = (f.width as usize, f.height as usize);
         // Airlight from the same sampled scene pixels the CPU path uses.
@@ -493,7 +503,12 @@ impl Gpu {
             let probe = detail::DetailParams::new(&s, [0.0; 3], f.scale);
             let noise = if probe.nr {
                 // Measured without exposure and scaled by sqrt(gain), as the CPU path does.
-                let key = [wbm[0].to_bits(), wbm[1].to_bits(), wbm[2].to_bits(), 0];
+                let key = [
+                    wbm[0].to_bits(),
+                    wbm[1].to_bits(),
+                    wbm[2].to_bits(),
+                    geo.lens_vignette.to_bits(),
+                ];
                 let mut cache = f.noise.lock().unwrap();
                 let n = match *cache {
                     Some((k, n)) if k == key => n,
@@ -501,7 +516,13 @@ impl Gpu {
                         let n = detail::noise_sigma(wu, hu, |x, y| {
                             let i = (y * fw + x) * 3;
                             let c = [f.host[i], f.host[i + 1], f.host[i + 2]];
-                            pe_pipeline::scene_pixel(c, wbm, &to_work, 1.0)
+                            let c = pe_pipeline::scene_pixel(c, wbm, &to_work, 1.0);
+                            if geo.lens_vignette != 0.0 {
+                                let g = geo.lens_gain(x, y);
+                                c.map(|v| v * g)
+                            } else {
+                                c
+                            }
                         });
                         *cache = Some((key, n));
                         n
@@ -568,6 +589,11 @@ impl Gpu {
             ],
             offs: [pl.scene, pl.sh, pl.cl, pl.tex],
             flags: [use_sh as u32, use_cl as u32, use_tx as u32, pl.dz],
+            geo0: geo.crop,
+            geo1: [geo.cos, geo.sin, geo.kx, geo.ky],
+            geo2: [geo.inv_scale, geo.k1, geo.lens_vignette, 0.0],
+            geo3: [geo.ca[0], geo.ca[1], geo.ca[2], 0.0],
+            geo4: [geo.frame_w as u32, geo.frame_h as u32, 0, 0],
         };
         self.queue
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));
@@ -694,7 +720,19 @@ impl Gpu {
                 fw * fh,
             ));
         }
-        list.push((Kernel::Final, PassUniform::default(), ow * oh));
+        if geo.active {
+            list.push(full(Kernel::Display, 0, pl.tex_h, 0, 0, 0, [0.0; 4]));
+            list.push((
+                Kernel::Geometry,
+                PassUniform {
+                    src: pl.tex_h,
+                    ..Default::default()
+                },
+                ow * oh,
+            ));
+        } else {
+            list.push((Kernel::Final, PassUniform::default(), ow * oh));
+        }
         assert!(list.len() as u64 <= MAX_PASSES);
 
         let mut records = vec![0u8; list.len() * PASS_STRIDE as usize];

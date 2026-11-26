@@ -13,6 +13,12 @@ final class DevelopModel: ObservableObject {
     @Published private(set) var image: NSImage?
     @Published private(set) var loading = true
     @Published private(set) var lastRenderMs: Int?
+    /// Crop tool active: render the whole frame and show the crop overlay.
+    // Development aid for UI snapshots: PE_START_CROP=1 opens the crop tool.
+    @Published var cropping = ProcessInfo.processInfo.environment["PE_START_CROP"] != nil {
+        didSet { if cropping != oldValue { requestRender() } }
+    }
+    @Published var cropAspect = CropAspect.presets[0]
     @Published var error: String?
 
     private var preview: PreviewImage?
@@ -21,6 +27,29 @@ final class DevelopModel: ObservableObject {
 
     var asShotTemperature: Double { preview?.asShotTemperature ?? 5500 }
     var asShotTint: Double { preview?.asShotTint ?? 0 }
+    /// Width / height of the corrected (oriented, uncropped) frame.
+    var frameAspect: Double {
+        guard let p = preview else { return 1.5 }
+        let swap = (5...8).contains(item.orientation) && settings.value[["applyOrientation"][...]] != .bool(false)
+        return swap ? Double(p.height) / Double(p.width) : Double(p.width) / Double(p.height)
+    }
+
+    /// Straighten: set the angle and re-fit the crop to the largest rectangle inside the rotated frame.
+    func setAngle(_ angle: Double) {
+        settings.cropAngle = angle
+        let k = straightenFit(aspect: frameAspect, angle: angle)
+        let m = (1 - k) / 2
+        settings.crop = CropRect(left: m, top: m, right: 1 - m, bottom: 1 - m)
+        requestRender()
+    }
+
+    func applyAspect(_ a: CropAspect) {
+        cropAspect = a
+        guard let r = a.ratio else { return }
+        settings.crop = fitAspect(settings.crop, aspect: r == 0 ? frameAspect : r, frameAspect: frameAspect)
+        commit(label: "Crop")
+    }
+
     var isRaw: Bool { !["jpg", "jpeg"].contains((item.path as NSString).pathExtension.lowercased()) }
 
     init(item: ImageItem, core: Core, onCommitted: @escaping (Int64) -> Void) {
@@ -48,7 +77,8 @@ final class DevelopModel: ObservableObject {
         guard let preview else { return }
         if rendering { pending = true; return }
         rendering = true
-        let s = settings
+        var s = settings
+        if cropping { s.crop = .full }
         Task {
             let t0 = Date()
             let img = await Task.detached(priority: .userInitiated) { preview.render(s) }.value
@@ -221,7 +251,30 @@ struct DevelopPanel: View {
         }
     }
 
+    @ViewBuilder private func cropControls() -> some View {
+        HStack {
+            Toggle(isOn: $model.cropping) { Label("Crop", systemImage: "crop") }
+                .toggleStyle(.button)
+                .help("Show the crop overlay (R)")
+            Picker("Aspect", selection: Binding(get: { model.cropAspect }, set: { model.applyAspect($0) })) {
+                ForEach(CropAspect.presets) { Text($0.label).tag($0) }
+            }
+            .labelsHidden()
+            .fixedSize()
+            Spacer()
+            Button("Reset") {
+                model.settings.crop = .full
+                model.settings.cropAngle = 0
+                model.requestRender()
+                model.commit(label: "Reset Crop")
+            }
+            .disabled(model.settings.crop == .full && model.settings.cropAngle == 0)
+        }
+        .controlSize(.small)
+    }
+
     @ViewBuilder private func paramSection(_ name: String, _ params: [ParamSpec]) -> some View {
+        if name == "Geometry" { cropControls() }
         ForEach(schema.choices.filter { $0.section == name }, id: \.key) { c in
             Picker(c.label, selection: Binding(
                 get: { model.settings.string(c.key) ?? c.options.first?.first ?? "" },
@@ -269,8 +322,11 @@ struct DevelopPanel: View {
     }
 
     private func binding(_ p: ParamSpec) -> Binding<Double> {
-        Binding(get: { model.settings.number(p.key) ?? p.default },
-                set: { model.settings.setNumber(p.key, $0); model.requestRender() })
+        if p.key == "crop.angle" {
+            return Binding(get: { model.settings.cropAngle }, set: { model.setAngle($0) })
+        }
+        return Binding(get: { model.settings.number(p.key) ?? p.default },
+                       set: { model.settings.setNumber(p.key, $0); model.requestRender() })
     }
 
     private func wbBinding(_ field: WritableKeyPath<WhiteBalance, Double?>, fallback: Double) -> Binding<Double> {

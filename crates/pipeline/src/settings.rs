@@ -186,6 +186,64 @@ impl Default for Grain {
     }
 }
 
+/// Crop rectangle (fractions of the corrected frame, 0..1) and straighten angle (degrees, -45..45).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Crop {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub angle: f32,
+}
+
+impl Default for Crop {
+    fn default() -> Self {
+        Self {
+            left: 0.0,
+            top: 0.0,
+            right: 1.0,
+            bottom: 1.0,
+            angle: 0.0,
+        }
+    }
+}
+
+/// Perspective correction.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Transform {
+    /// -100..100: + corrects verticals that converge upwards.
+    pub vertical: f32,
+    /// -100..100.
+    pub horizontal: f32,
+    /// 50..150 (%).
+    pub scale: f32,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            vertical: 0.0,
+            horizontal: 0.0,
+            scale: 100.0,
+        }
+    }
+}
+
+/// Manual lens corrections, each -100..100.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LensCorrection {
+    /// + corrects barrel distortion, - pincushion.
+    pub distortion: f32,
+    /// + brightens the corners (corrects lens fall-off).
+    pub vignetting: f32,
+    /// Lateral chromatic aberration: red/cyan and blue/yellow fringes.
+    pub ca_red_cyan: f32,
+    pub ca_blue_yellow: f32,
+}
+
 /// Current rendering algorithm generation.
 pub const PROCESS_VERSION: u32 = 1;
 
@@ -230,6 +288,9 @@ pub struct Settings {
     pub noise_reduction: NoiseReduction,
     pub vignette: Vignette,
     pub grain: Grain,
+    pub crop: Crop,
+    pub transform: Transform,
+    pub lens: LensCorrection,
     pub demosaic: Demosaic,
     /// Apply the camera orientation (rotate/flip) to the output.
     pub apply_orientation: bool,
@@ -260,6 +321,9 @@ impl Default for Settings {
             noise_reduction: NoiseReduction::default(),
             vignette: Vignette::default(),
             grain: Grain::default(),
+            crop: Crop::default(),
+            transform: Transform::default(),
+            lens: LensCorrection::default(),
             demosaic: Demosaic::Auto,
             apply_orientation: true,
         }
@@ -306,6 +370,30 @@ impl Settings {
         let gr = &mut self.grain;
         for x in [&mut gr.amount, &mut gr.size, &mut gr.roughness] {
             *x = x.clamp(0.0, 100.0);
+        }
+        let c = &mut self.crop;
+        for x in [&mut c.left, &mut c.top, &mut c.right, &mut c.bottom] {
+            *x = x.clamp(0.0, 1.0);
+        }
+        if c.right - c.left < 0.01 || c.bottom - c.top < 0.01 {
+            *c = Crop {
+                angle: c.angle,
+                ..Crop::default()
+            };
+        }
+        c.angle = c.angle.clamp(-45.0, 45.0);
+        let t = &mut self.transform;
+        t.vertical = t.vertical.clamp(-100.0, 100.0);
+        t.horizontal = t.horizontal.clamp(-100.0, 100.0);
+        t.scale = t.scale.clamp(50.0, 150.0);
+        let l = &mut self.lens;
+        for x in [
+            &mut l.distortion,
+            &mut l.vignetting,
+            &mut l.ca_red_cyan,
+            &mut l.ca_blue_yellow,
+        ] {
+            *x = x.clamp(-100.0, 100.0);
         }
         let n = &mut self.noise_reduction;
         for v in [&mut n.luminance, &mut n.detail, &mut n.color] {

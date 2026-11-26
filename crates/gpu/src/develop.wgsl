@@ -22,6 +22,11 @@ struct Params {
     haze2: vec4<f32>,     // omega (dehaze) , beta (add haze), unused, unused
     offs: vec4<u32>,      // pool offsets: scene, shadows/highlights coeffs, clarity coeffs, texture blur
     flags: vec4<u32>,     // shadows/highlights, clarity, texture, dehaze coefficients offset
+    geo0: vec4<f32>,      // crop left, top, right, bottom
+    geo1: vec4<f32>,      // cos, sin (straighten), perspective kx, ky
+    geo2: vec4<f32>,      // 1 / scale, distortion k1, lens vignetting (stops), unused
+    geo3: vec4<f32>,      // chromatic aberration scale R, G, B, unused
+    geo4: vec4<u32>,      // corrected frame width, height, unused, unused
 };
 
 // Per-pass parameters for the generic kernels.
@@ -119,7 +124,14 @@ fn scene_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     if (i >= P.dims.x * P.dims.y) { return; }
     let cam = vec3<f32>(src[3u * i], src[3u * i + 1u], src[3u * i + 2u]);
     let b = reconstruct(cam);
-    let w = vec3<f32>(dot(P.m0.xyz, b), dot(P.m1.xyz, b), dot(P.m2.xyz, b)) * P.wb.w;
+    var w = vec3<f32>(dot(P.m0.xyz, b), dot(P.m1.xyz, b), dot(P.m2.xyz, b)) * P.wb.w;
+    if (P.geo2.z != 0.0) {
+        let sw = f32(P.dims.x);
+        let sh = f32(P.dims.y);
+        let dx = f32(i % P.dims.x) + 0.5 - sw * 0.5;
+        let dy = f32(i / P.dims.x) + 0.5 - sh * 0.5;
+        w *= exp2(P.geo2.z * (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25));
+    }
     pool[P.offs.x + i] = vec4<f32>(w, log2(max(luma(w), 1.0e-6)));
 }
 
@@ -561,21 +573,16 @@ fn effects(c0: vec3<f32>, x: u32, y: u32, w: u32, h: u32) -> vec3<f32> {
     return c;
 }
 
-@compute @workgroup_size(256)
-fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
-    let i = index(gid, nwg);
-    let ow = P.dims3.x;
-    if (i >= ow * P.dims3.y) { return; }
-    let s = oriented_source(i % ow, i / ow, P.dims2.z);
-    let j = s.y * P.dims.x + s.x;
+// Develop one sensor-space pixel (index j at (sx, sy)) up to display-linear values after the curve.
+fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
     let px = pool[P.offs.x + j];
     var c = px.xyz;
     let l = px.w;
 
     // Local gain: shadows/highlights, clarity, texture (local.rs local_gains).
     let inv = 1.0 / f32(P.dims2.x);
-    let fx = (f32(s.x) + 0.5) * inv;
-    let fy = (f32(s.y) + 0.5) * inv;
+    let fx = (f32(sx) + 0.5) * inv;
+    let fy = (f32(sy) + 0.5) * inv;
     var d = 0.0;
     if (P.flags.x != 0u) {
         let m = sample_plane(P.offs.y, fx, fy);
@@ -600,9 +607,101 @@ fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
             e[k] = srgb_decode(curve(srgb_encode(clamp(e[k], 0.0, 1.0))));
         }
     }
-    e = effects(e, i % ow, i / ow, ow, P.dims3.y);
+    return e;
+}
+
+// Effects at output (x, y), conversion to the output space and 8-bit packing.
+fn finish(e0: vec3<f32>, x: u32, y: u32) -> u32 {
+    let e = effects(e0, x, y, P.dims3.x, P.dims3.y);
     let lin = gamut_map(vec3<f32>(dot(P.o0.xyz, e), dot(P.o1.xyz, e), dot(P.o2.xyz, e)));
     let enc = vec3<f32>(srgb_encode(lin.x), srgb_encode(lin.y), srgb_encode(lin.z));
     let q = vec3<u32>(enc * 255.0 + vec3<f32>(0.5));
-    out_rgba[i] = q.x | (q.y << 8u) | (q.z << 16u) | (255u << 24u);
+    return q.x | (q.y << 8u) | (q.z << 16u) | (255u << 24u);
+}
+
+// Without geometry: develop each output pixel from its (oriented) source pixel.
+@compute @workgroup_size(256)
+fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    let ow = P.dims3.x;
+    if (i >= ow * P.dims3.y) { return; }
+    let s = oriented_source(i % ow, i / ow, P.dims2.z);
+    out_rgba[i] = finish(develop_pixel(s.y * P.dims.x + s.x, s.x, s.y), i % ow, i / ow);
+}
+
+// --- Geometry (geometry.rs) --------------------------------------------------------------------
+
+// With geometry: develop every sensor-space pixel into plane Q.dst first.
+@compute @workgroup_size(256)
+fn display_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    let w = P.dims.x;
+    if (i >= w * P.dims.y) { return; }
+    pool[Q.dst + i] = vec4<f32>(develop_pixel(i, i % w, i / w), 0.0);
+}
+
+// Continuous sensor position sampled for output pixel (x, y), channel c.
+fn geo_source(x: u32, y: u32, c: u32) -> vec2<f32> {
+    let fw = f32(P.geo4.x);
+    let fh = f32(P.geo4.y);
+    let xt = (P.geo0.x + (f32(x) + 0.5) / f32(P.dims3.x) * (P.geo0.z - P.geo0.x)) * fw;
+    let yt = (P.geo0.y + (f32(y) + 0.5) / f32(P.dims3.y) * (P.geo0.w - P.geo0.y)) * fh;
+    let cx = xt - fw * 0.5;
+    let cy = yt - fh * 0.5;
+    let rx = cx * P.geo1.x + cy * P.geo1.y;
+    let ry = -cx * P.geo1.y + cy * P.geo1.x;
+    let nx = rx / (fw * 0.5);
+    let ny = ry / (fh * 0.5);
+    let wq = 1.0 + P.geo1.z * nx + P.geo1.w * ny;
+    let px = nx / wq * P.geo2.x * fw * 0.5 + fw * 0.5;
+    let py = ny / wq * P.geo2.x * fh * 0.5 + fh * 0.5;
+    let sw = f32(P.dims.x);
+    let sh = f32(P.dims.y);
+    var s = vec2<f32>(px, py);
+    switch P.dims2.z {
+        case 2u: { s = vec2<f32>(sw - px, py); }
+        case 3u: { s = vec2<f32>(sw - px, sh - py); }
+        case 4u: { s = vec2<f32>(px, sh - py); }
+        case 5u: { s = vec2<f32>(py, px); }
+        case 6u: { s = vec2<f32>(py, sh - px); }
+        case 7u: { s = vec2<f32>(sw - py, sh - px); }
+        case 8u: { s = vec2<f32>(sw - py, px); }
+        default: {}
+    }
+    let dx = s.x - sw * 0.5;
+    let dy = s.y - sh * 0.5;
+    let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
+    let f = (1.0 + P.geo2.y * r2) * P.geo3[c];
+    return vec2<f32>(sw * 0.5 + dx * f, sh * 0.5 + dy * f);
+}
+
+fn geo_sample(off: u32, p: vec2<f32>, c: u32) -> f32 {
+    let w = P.dims.x;
+    let h = P.dims.y;
+    if (p.x < 0.0 || p.x > f32(w) || p.y < 0.0 || p.y > f32(h)) { return 0.0; }
+    let x = clamp(p.x - 0.5, 0.0, f32(w - 1u));
+    let y = clamp(p.y - 0.5, 0.0, f32(h - 1u));
+    let x0 = u32(floor(x));
+    let y0 = u32(floor(y));
+    let x1 = min(x0 + 1u, w - 1u);
+    let y1 = min(y0 + 1u, h - 1u);
+    let tx = x - f32(x0);
+    let ty = y - f32(y0);
+    let top = pool[off + y0 * w + x0][c] * (1.0 - tx) + pool[off + y0 * w + x1][c] * tx;
+    let bot = pool[off + y1 * w + x0][c] * (1.0 - tx) + pool[off + y1 * w + x1][c] * tx;
+    return top * (1.0 - ty) + bot * ty;
+}
+
+@compute @workgroup_size(256)
+fn geometry_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    let ow = P.dims3.x;
+    if (i >= ow * P.dims3.y) { return; }
+    let x = i % ow;
+    let y = i / ow;
+    var e = vec3<f32>(0.0);
+    for (var c = 0u; c < 3u; c++) {
+        e[c] = geo_sample(Q.src, geo_source(x, y, c), c);
+    }
+    out_rgba[i] = finish(e, x, y);
 }

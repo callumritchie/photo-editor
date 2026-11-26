@@ -7,7 +7,7 @@ software vendor.
 
 ## Status
 
-**M0–M5 done.** There is a working Mac app (photo library, import, grid, an editing view with live GPU-rendered sliders, history, snapshots and presets, cached previews, and export), and the core decodes and renders raws.
+**M0–M6 done.** There is a working Mac app (photo library, import, grid, an editing view with live GPU-rendered sliders, history, snapshots and presets, cached previews, and export), and the core decodes and renders raws.
 
 **Rendering (M2).** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
 and renders them on the CPU:
@@ -51,7 +51,8 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
 - **Edit (loupe):** `Return` on a photo opens it with the Develop panel: white balance (as shot / auto / custom temperature and tint),
   exposure, contrast, highlights, shadows, whites and blacks; texture, clarity and dehaze; vibrance and saturation; a colour mixer (hue, saturation and
   luminance for eight colour bands); black & white with a per-colour mix; colour grading for shadows, midtones, highlights
-  and overall; sharpening and noise reduction (luminance and colour); vignette and grain. Sliders update a live preview while you drag, rendered on the GPU (Metal)
+  and overall; sharpening and noise reduction (luminance and colour); vignette and grain; crop and straighten (press `R`
+  for the crop overlay, with aspect presets), perspective, and manual lens corrections (distortion, fringing, fall-off). Sliders update a live preview while you drag, rendered on the GPU (Metal)
   in about 5–15 ms; without a GPU the CPU takes 25–55 ms. Each release records one history step. ⌘Z/⇧⌘Z undo and redo; click any history step to return to it.
   You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
   selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.

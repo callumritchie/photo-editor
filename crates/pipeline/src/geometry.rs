@@ -1,0 +1,301 @@
+//! Geometry: crop, straighten, perspective, and manual lens corrections.
+//!
+//! Design (this project's own). Every output pixel is mapped back to a position in the sensor-space
+//! image through one inverse transform, then sampled bilinearly (black outside the frame):
+//! 1. crop: the output covers the rectangle `crop` (fractions 0..1) of the corrected frame;
+//! 2. straighten: rotate by -angle about the centre;
+//! 3. perspective: a homography in coordinates where the frame spans -1..1, source = p / w / scale
+//!    with w = 1 + kx x + ky y (Vertical / Horizontal tilt the plane; Scale zooms);
+//! 4. orientation: the camera's EXIF rotation/flip, inverted;
+//! 5. lens distortion: radial, source = centre + d (1 + k1 r^2), r relative to the half-diagonal;
+//! 6. lateral chromatic aberration: red and blue sampled at slightly different radial scales.
+//!
+//! Resampling happens after all per-pixel processing (in sensor space), on both CPU and GPU, so both
+//! apply the same nonlinear steps to the same values. Lens vignetting correction is a radial gain in
+//! scene-linear light, applied with white balance.
+
+use rayon::prelude::*;
+
+use crate::Settings;
+
+/// Perspective tilt at +/-100 (homography coefficient), distortion k1 at +/-100, chromatic
+/// aberration radial scale at +/-100, lens vignetting at +/-100 (stops at the corners).
+pub const PERSPECTIVE_MAX: f32 = 0.5;
+pub const DISTORTION_MAX: f32 = 0.15;
+pub const CA_MAX: f32 = 0.003;
+pub const LENS_VIGNETTE_STOPS: f32 = 1.5;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeometryParams {
+    /// Whether resampling is needed (otherwise only orientation applies).
+    pub active: bool,
+    /// Sensor-space frame size.
+    pub src_w: usize,
+    pub src_h: usize,
+    /// EXIF orientation applied (1 = none).
+    pub orientation: u8,
+    /// Oriented (displayed) frame size.
+    pub frame_w: usize,
+    pub frame_h: usize,
+    pub out_w: usize,
+    pub out_h: usize,
+    pub crop: [f32; 4],
+    pub cos: f32,
+    pub sin: f32,
+    pub kx: f32,
+    pub ky: f32,
+    pub inv_scale: f32,
+    pub k1: f32,
+    /// Radial scale per channel (R, G, B) for chromatic aberration.
+    pub ca: [f32; 3],
+    /// Lens vignetting correction, stops at the corners.
+    pub lens_vignette: f32,
+}
+
+impl GeometryParams {
+    pub fn new(s: &Settings, src_w: usize, src_h: usize, orientation: u8) -> Self {
+        let orientation = if s.apply_orientation && (2..=8).contains(&orientation) {
+            orientation
+        } else {
+            1
+        };
+        let (frame_w, frame_h) = if orientation >= 5 {
+            (src_h, src_w)
+        } else {
+            (src_w, src_h)
+        };
+        let c = &s.crop;
+        let crop = [
+            c.left.clamp(0.0, 1.0),
+            c.top.clamp(0.0, 1.0),
+            c.right.clamp(0.0, 1.0),
+            c.bottom.clamp(0.0, 1.0),
+        ];
+        let (cw, ch) = ((crop[2] - crop[0]).max(1e-4), (crop[3] - crop[1]).max(1e-4));
+        let t = &s.transform;
+        let l = &s.lens;
+        let angle = c.angle.to_radians();
+        let ca = [
+            1.0 + l.ca_red_cyan / 100.0 * CA_MAX,
+            1.0,
+            1.0 + l.ca_blue_yellow / 100.0 * CA_MAX,
+        ];
+        let active = crop != [0.0, 0.0, 1.0, 1.0]
+            || angle != 0.0
+            || t.vertical != 0.0
+            || t.horizontal != 0.0
+            || t.scale != 100.0
+            || l.distortion != 0.0
+            || ca != [1.0; 3];
+        Self {
+            active,
+            src_w,
+            src_h,
+            orientation,
+            frame_w,
+            frame_h,
+            out_w: ((frame_w as f32 * cw).round() as usize).max(1),
+            out_h: ((frame_h as f32 * ch).round() as usize).max(1),
+            crop,
+            cos: angle.cos(),
+            sin: angle.sin(),
+            kx: -t.horizontal / 100.0 * PERSPECTIVE_MAX,
+            ky: -t.vertical / 100.0 * PERSPECTIVE_MAX,
+            inv_scale: 100.0 / t.scale.max(1.0),
+            k1: -l.distortion / 100.0 * DISTORTION_MAX,
+            ca,
+            lens_vignette: l.vignetting / 100.0 * LENS_VIGNETTE_STOPS,
+        }
+    }
+
+    /// Output size when [`active`](Self::active); otherwise the oriented frame size.
+    pub fn output_size(&self) -> (usize, usize) {
+        if self.active {
+            (self.out_w, self.out_h)
+        } else {
+            (self.frame_w, self.frame_h)
+        }
+    }
+
+    /// Continuous sensor-space position (pixel edges at integers) sampled for output pixel (x, y),
+    /// channel `c`.
+    #[inline]
+    pub fn source(&self, x: usize, y: usize, c: usize) -> (f32, f32) {
+        let (fw, fh) = (self.frame_w as f32, self.frame_h as f32);
+        // 1. crop -> corrected frame.
+        let xt = (self.crop[0]
+            + (x as f32 + 0.5) / self.out_w as f32 * (self.crop[2] - self.crop[0]))
+            * fw;
+        let yt = (self.crop[1]
+            + (y as f32 + 0.5) / self.out_h as f32 * (self.crop[3] - self.crop[1]))
+            * fh;
+        // 2. straighten.
+        let (cx, cy) = (xt - fw * 0.5, yt - fh * 0.5);
+        let rx = cx * self.cos + cy * self.sin;
+        let ry = -cx * self.sin + cy * self.cos;
+        // 3. perspective.
+        let (nx, ny) = (rx / (fw * 0.5), ry / (fh * 0.5));
+        let w = 1.0 + self.kx * nx + self.ky * ny;
+        let (px, py) = (
+            nx / w * self.inv_scale * fw * 0.5 + fw * 0.5,
+            ny / w * self.inv_scale * fh * 0.5 + fh * 0.5,
+        );
+        // 4. orientation (continuous form of orient::apply).
+        let (sw, sh) = (self.src_w as f32, self.src_h as f32);
+        let (sx, sy) = match self.orientation {
+            2 => (sw - px, py),
+            3 => (sw - px, sh - py),
+            4 => (px, sh - py),
+            5 => (py, px),
+            6 => (py, sh - px),
+            7 => (sw - py, sh - px),
+            8 => (sw - py, px),
+            _ => (px, py),
+        };
+        // 5-6. lens distortion and chromatic aberration.
+        let (dx, dy) = (sx - sw * 0.5, sy - sh * 0.5);
+        let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
+        let f = (1.0 + self.k1 * r2) * self.ca[c];
+        (sw * 0.5 + dx * f, sh * 0.5 + dy * f)
+    }
+
+    /// Lens vignetting gain for sensor pixel (x, y).
+    #[inline]
+    pub fn lens_gain(&self, x: usize, y: usize) -> f32 {
+        let (sw, sh) = (self.src_w as f32, self.src_h as f32);
+        let (dx, dy) = (x as f32 + 0.5 - sw * 0.5, y as f32 + 0.5 - sh * 0.5);
+        let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
+        (self.lens_vignette * r2).exp2()
+    }
+}
+
+/// Bilinear sample of channel `c` of interleaved RGB at a continuous position (pixel centres at
+/// integer + 0.5). Outside the frame: 0.
+#[inline]
+pub fn bilinear(img: &[f32], w: usize, h: usize, fx: f32, fy: f32, c: usize) -> f32 {
+    if !(0.0..=w as f32).contains(&fx) || !(0.0..=h as f32).contains(&fy) {
+        return 0.0;
+    }
+    let x = (fx - 0.5).clamp(0.0, (w - 1) as f32);
+    let y = (fy - 0.5).clamp(0.0, (h - 1) as f32);
+    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+    let at = |xx: usize, yy: usize| img[(yy * w + xx) * 3 + c];
+    let top = at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx;
+    let bot = at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx;
+    top * (1.0 - ty) + bot * ty
+}
+
+/// Resample a sensor-space RGB image through the geometry; returns (width, height, data).
+pub fn resample(img: &[f32], p: &GeometryParams) -> (usize, usize, Vec<f32>) {
+    let (w, h) = (p.out_w, p.out_h);
+    let mut out = vec![0.0; w * h * 3];
+    out.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            for c in 0..3 {
+                let (fx, fy) = p.source(x, y, c);
+                row[x * 3 + c] = bilinear(img, p.src_w, p.src_h, fx, fy, c);
+            }
+        }
+    });
+    (w, h, out)
+}
+
+/// Scale of the largest centred rectangle with the frame's aspect ratio that fits inside the frame
+/// rotated by `angle_deg` (for auto-cropping when straightening).
+pub fn straighten_fit(w: f32, h: f32, angle_deg: f32) -> f32 {
+    let (s, c) = (
+        angle_deg.to_radians().sin().abs(),
+        angle_deg.to_radians().cos(),
+    );
+    (w / (w * c + h * s)).min(h / (w * s + h * c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{Crop, LensCorrection};
+
+    fn grid(w: usize, h: usize) -> Vec<f32> {
+        (0..w * h)
+            .flat_map(|i| [(i % w) as f32, (i / w) as f32, 1.0])
+            .collect()
+    }
+
+    #[test]
+    fn identity_maps_pixel_centres_and_orientation_matches_orient_apply() {
+        let (w, h) = (7, 5);
+        let img = grid(w, h);
+        for code in 1..=8u8 {
+            let mut p = GeometryParams::new(&Settings::default(), w, h, code);
+            p.active = true;
+            let (ow, oh, out) = resample(&img, &p);
+            let (ew, eh, expect) = crate::orient::apply(code, w, h, &img);
+            assert_eq!((ow, oh), (ew, eh));
+            for (a, b) in out.iter().zip(&expect) {
+                assert!((a - b).abs() < 1e-3, "orientation {code}");
+            }
+        }
+    }
+
+    #[test]
+    fn crop_selects_the_region_and_rotation_fits() {
+        let (w, h) = (100, 50);
+        let img = grid(w, h);
+        let s = Settings {
+            crop: Crop {
+                left: 0.5,
+                top: 0.0,
+                right: 1.0,
+                bottom: 0.5,
+                angle: 0.0,
+            },
+            ..Default::default()
+        };
+        let p = GeometryParams::new(&s, w, h, 1);
+        let (ow, oh, out) = resample(&img, &p);
+        assert_eq!((ow, oh), (50, 25));
+        assert!(
+            (out[0] - 50.0).abs() < 1e-3 && (out[1] - 0.0).abs() < 1e-3,
+            "top-left is source (50, 0)"
+        );
+        // A rotated, auto-fitted crop never samples outside the frame.
+        let k = straighten_fit(w as f32, h as f32, 10.0);
+        let m = (1.0 - k) / 2.0;
+        let s = Settings {
+            crop: Crop {
+                left: m,
+                top: m,
+                right: 1.0 - m,
+                bottom: 1.0 - m,
+                angle: 10.0,
+            },
+            ..Default::default()
+        };
+        let (_, _, out) = resample(&img, &GeometryParams::new(&s, w, h, 1));
+        assert!(out.chunks(3).all(|p| p[2] > 0.99), "no black corners");
+    }
+
+    #[test]
+    fn distortion_and_ca_move_samples_radially() {
+        let s = Settings {
+            lens: LensCorrection {
+                distortion: 100.0,
+                ca_red_cyan: 100.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p = GeometryParams::new(&s, 200, 100, 1);
+        // Barrel correction (k1 < 0) samples corners closer to the centre; red further out than green.
+        let (gx, _) = p.source(0, 0, 1);
+        let (rx, _) = p.source(0, 0, 0);
+        assert!(gx > 0.5 && rx < gx, "{gx} {rx}");
+        let (cx, cy) = p.source(100, 50, 1);
+        assert!(
+            (cx - 100.5).abs() < 0.01 && (cy - 50.5).abs() < 0.01,
+            "centre fixed"
+        );
+    }
+}

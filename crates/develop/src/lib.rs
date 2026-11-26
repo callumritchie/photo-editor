@@ -34,12 +34,16 @@ pub enum Group {
     NoiseReduction,
     Vignette,
     Grain,
+    /// Crop rectangle and straighten angle (not part of "looks").
+    Crop,
+    Transform,
+    LensCorrections,
     /// Technical processing choices (demosaic method, orientation handling). Not part of "looks".
     Processing,
 }
 
 impl Group {
-    pub const ALL: [Group; 18] = [
+    pub const ALL: [Group; 21] = [
         Group::WhiteBalance,
         Group::Exposure,
         Group::Contrast,
@@ -57,12 +61,15 @@ impl Group {
         Group::NoiseReduction,
         Group::Vignette,
         Group::Grain,
+        Group::Crop,
+        Group::Transform,
+        Group::LensCorrections,
         Group::Processing,
     ];
 
     /// Whether the group is part of a "look" (the default selection for presets and paste).
     pub fn is_look(self) -> bool {
-        self != Group::Processing
+        !matches!(self, Group::Processing | Group::Crop)
     }
 
     pub fn label(self) -> &'static str {
@@ -84,6 +91,9 @@ impl Group {
             Group::NoiseReduction => "Noise Reduction",
             Group::Vignette => "Vignette",
             Group::Grain => "Grain",
+            Group::Crop => "Crop",
+            Group::Transform => "Transform",
+            Group::LensCorrections => "Lens Corrections",
             Group::Processing => "Processing",
         }
     }
@@ -108,6 +118,9 @@ impl Group {
             Group::NoiseReduction => &["noiseReduction"],
             Group::Vignette => &["vignette"],
             Group::Grain => &["grain"],
+            Group::Crop => &["crop"],
+            Group::Transform => &["transform"],
+            Group::LensCorrections => &["lens"],
             Group::Processing => &["demosaic", "applyOrientation"],
         }
     }
@@ -421,6 +434,59 @@ fn build_params() -> Vec<ParamSpec> {
         "Grain",
         0.0,
         50.0,
+    ));
+    let g = |key: &str, label: &str, group, sub| ParamSpec {
+        subsection: Some(sub),
+        ..spec(key, label, group, "Geometry")
+    };
+    v.push(ParamSpec {
+        min: -45.0,
+        max: 45.0,
+        step: 0.1,
+        precision: 1,
+        ..g("crop.angle", "Angle", Group::Crop, "Crop")
+    });
+    v.push(g(
+        "transform.vertical",
+        "Vertical",
+        Group::Transform,
+        "Transform",
+    ));
+    v.push(g(
+        "transform.horizontal",
+        "Horizontal",
+        Group::Transform,
+        "Transform",
+    ));
+    v.push(ParamSpec {
+        min: 50.0,
+        max: 150.0,
+        default: 100.0,
+        ..g("transform.scale", "Scale", Group::Transform, "Transform")
+    });
+    v.push(g(
+        "lens.distortion",
+        "Distortion",
+        Group::LensCorrections,
+        "Lens",
+    ));
+    v.push(g(
+        "lens.vignetting",
+        "Vignetting",
+        Group::LensCorrections,
+        "Lens",
+    ));
+    v.push(g(
+        "lens.caRedCyan",
+        "Red / Cyan Fringe",
+        Group::LensCorrections,
+        "Lens",
+    ));
+    v.push(g(
+        "lens.caBlueYellow",
+        "Blue / Yellow Fringe",
+        Group::LensCorrections,
+        "Lens",
     ));
     v
 }

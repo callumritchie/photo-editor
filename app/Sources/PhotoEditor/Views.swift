@@ -310,7 +310,18 @@ struct LoupeImage: View {
             Color.black.opacity(0.92)
             Group {
                 if let image = model.image ?? fallback {
-                    Image(nsImage: image).resizable().scaledToFit().padding(16).padding(.bottom, 36)
+                    Image(nsImage: image).resizable().scaledToFit()
+                        .overlay {
+                            if model.cropping && model.image != nil {
+                                CropOverlay(
+                                    rect: Binding(get: { model.settings.crop },
+                                                  set: { model.settings.crop = $0 }),
+                                    aspect: model.cropAspect.ratio.map { $0 == 0 ? model.frameAspect : $0 },
+                                    frameAspect: model.frameAspect,
+                                    onCommit: { model.commit(label: "Crop") })
+                            }
+                        }
+                        .padding(16).padding(.bottom, 36)
                 } else {
                     ProgressView()
                 }
@@ -338,7 +349,15 @@ struct LoupeImage: View {
         .focused($focused)
         .focusEffectDisabled()
         .onAppear { focused = true }
-        .onKeyPress(.escape) { state.mode = .grid; return .handled }
+        .onKeyPress(.escape) {
+            if model.cropping { model.cropping = false } else { state.mode = .grid }
+            return .handled
+        }
+        .onKeyPress(.return) {
+            if model.cropping { model.cropping = false; return .handled }
+            return .ignored
+        }
+        .onKeyPress("r") { model.cropping.toggle(); return .handled }
         .onKeyPress(.leftArrow) { state.move(by: -1); return .handled }
         .onKeyPress(.rightArrow) { state.move(by: 1); return .handled }
         .onKeyPress { press in state.handleKey(press.characters) ? .handled : .ignored }

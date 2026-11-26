@@ -230,8 +230,13 @@ final class PreviewImage: @unchecked Sendable {
     private let handle: OpaquePointer
     let asShotTemperature: Double?
     let asShotTint: Double?
+    /// Preview size in sensor orientation.
+    let width: Int
+    let height: Int
 
     private struct Info: Decodable {
+        let width: Int
+        let height: Int
         let asShotTemperature: Double?
         let asShotTint: Double?
     }
@@ -242,6 +247,8 @@ final class PreviewImage: @unchecked Sendable {
         let info: Info? = try? decodeOwned(pe_image_info_json(h))
         asShotTemperature = info?.asShotTemperature
         asShotTint = info?.asShotTint
+        width = info?.width ?? 1
+        height = info?.height ?? 1
     }
 
     deinit { pe_image_close(handle) }

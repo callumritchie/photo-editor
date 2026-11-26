@@ -8,7 +8,8 @@
 //! 5. contrast, filmic display transform (whites), black level; colour (mixer, vibrance/saturation,
 //!    black and white, grading)
 //! 6. Rec.2020 -> linear sRGB, gamut mapping, sRGB encoding
-//! 7. point curve (encoded values), orientation; effects (vignette, grain)
+//! 7. point curve (encoded values); geometry (crop, straighten, perspective, lens; orientation);
+//!    effects (vignette, grain)
 //!
 //! `pe-gpu` implements the same stages for linear-RGB frames and is tested against this path.
 
@@ -16,6 +17,7 @@ pub mod demosaic;
 pub mod detail;
 pub mod effects;
 pub mod filter;
+pub mod geometry;
 pub mod local;
 pub mod look;
 pub mod orient;
@@ -24,8 +26,8 @@ pub mod tone;
 pub mod wb;
 
 pub use settings::{
-    Demosaic, GradeWheel, Grading, Grain, Hsl, NoiseReduction, Settings, Sharpening, Treatment,
-    Vignette, WhiteBalance, HUE_BANDS, PROCESS_VERSION,
+    Crop, Demosaic, GradeWheel, Grading, Grain, Hsl, LensCorrection, NoiseReduction, Settings,
+    Sharpening, Transform, Treatment, Vignette, WhiteBalance, HUE_BANDS, PROCESS_VERSION,
 };
 
 pub use pe_colour::ColorSpace;
@@ -192,6 +194,10 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
     let (w, h) = (scene.width, scene.height);
     let mut data = scene.data;
 
+    // Dehaze's airlight is estimated on the scene before noise reduction and sharpening (the GPU host
+    // computes it from the same scene pixels).
+    let airlight =
+        (settings.dehaze != 0.0).then(|| local::airlight(&local::airlight_samples(&data, w, h)));
     let dp = detail::DetailParams::new(&settings, [0.0; 3], frame.scale);
     if dp.enabled() {
         let noise = if dp.nr {
@@ -213,8 +219,7 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
             &detail::DetailParams::new(&settings, noise, frame.scale),
         );
     }
-    if settings.dehaze != 0.0 {
-        let a = local::airlight(&local::airlight_samples(&data, w, h));
+    if let Some(a) = airlight {
         local::dehaze(&mut data, w, h, settings.dehaze, a);
     }
     if let Some(gains) = local::local_gains(&data, w, h, &settings) {
@@ -241,8 +246,11 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
         px.copy_from_slice(&d);
     });
 
-    let (w, h, mut data) = if settings.apply_orientation {
-        orient::apply(frame.orientation, w, h, &data)
+    let geo = geometry::GeometryParams::new(&settings, w, h, frame.orientation);
+    let (w, h, mut data) = if geo.active {
+        geometry::resample(&data, &geo)
+    } else if geo.orientation != 1 {
+        orient::apply(geo.orientation, w, h, &data)
     } else {
         (w, h, data)
     };
@@ -298,9 +306,20 @@ pub fn render_scene(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, R
     let gain = settings.exposure.exp2();
 
     let mut data = cam;
-    data.par_chunks_mut(3).for_each(|px| {
-        px.copy_from_slice(&scene_pixel([px[0], px[1], px[2]], wb, &to_work, gain));
-    });
+    let geo = geometry::GeometryParams::new(settings, frame.width, frame.height, frame.orientation);
+    let lens = geo.lens_vignette != 0.0;
+    data.par_chunks_mut(frame.width * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, px) in row.chunks_mut(3).enumerate() {
+                let mut c = scene_pixel([px[0], px[1], px[2]], wb, &to_work, gain);
+                if lens {
+                    let g = geo.lens_gain(x, y);
+                    c = c.map(|v| v * g);
+                }
+                px.copy_from_slice(&c);
+            }
+        });
     Ok(RgbImage {
         width: frame.width,
         height: frame.height,
