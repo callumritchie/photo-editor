@@ -1555,6 +1555,7 @@ dependencies = [
  "pe-pipeline",
  "pe-raw",
  "pollster",
+ "serde_json",
  "thiserror",
  "wgpu",
 ]

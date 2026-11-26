@@ -65,6 +65,19 @@ fn main() {
             },
         ),
         (
+            "3 masks (radial, linear, colour)",
+            Settings {
+                masks: serde_json::from_str(r#"[
+                  {"id":"a","components":[{"shape":{"type":"radial","cx":0.5,"cy":0.5,"rx":0.3,"ry":0.3,"feather":0.6}}],
+                   "adjust":{"exposure":0.6,"clarity":30}},
+                  {"id":"b","components":[{"shape":{"type":"linear","x0":0.5,"y0":0,"x1":0.5,"y1":0.5}}],
+                   "adjust":{"exposure":-0.5,"temperature":-30,"saturation":20}},
+                  {"id":"c","components":[{"shape":{"type":"color","colors":[[0.6,0.1,0.1]],"tolerance":50}}],
+                   "adjust":{"saturation":40}}]"#).unwrap(),
+                ..Default::default()
+            },
+        ),
+        (
             "all local + colour",
             Settings {
                 shadows: 40.0,

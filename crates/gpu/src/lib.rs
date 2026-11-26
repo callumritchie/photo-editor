@@ -13,7 +13,10 @@ use std::sync::Mutex;
 
 use bytemuck::{Pod, Zeroable};
 use pe_colour::{ColorSpace, REC2020_TO_XYZ_D65};
-use pe_pipeline::{detail, effects, geometry, local, look, tone, wb, Settings, WhiteBalance};
+use pe_pipeline::masks::{Combine, MaskParams, PreparedShape};
+use pe_pipeline::{
+    detail, effects, geometry, local, look, masks, tone, wb, Settings, WhiteBalance,
+};
 use pe_raw::{Layout, RawFrame};
 use wgpu::util::DeviceExt;
 
@@ -67,6 +70,105 @@ struct PassUniform {
     r: u32,
     pad: [u32; 3],
     k: [f32; 4],
+}
+
+/// Mask buffer size in vec4 records: an 8-record header plus 30 per mask.
+const MASK_RECORDS: usize = 8 + masks::MAX_MASKS * 30;
+
+/// Pack prepared masks for the shader: records (see develop.wgsl) and raster / colour data.
+fn pack_masks(mp: &MaskParams) -> (Vec<[f32; 4]>, Vec<f32>) {
+    let mut rec = vec![[0.0f32; 4]; MASK_RECORDS];
+    let mut data: Vec<f32> = Vec::new();
+    rec[0] = [
+        mp.masks.len() as f32,
+        mp.needs_display as u8 as f32,
+        mp.needs_saturation as u8 as f32,
+        0.0,
+    ];
+    rec[1] = [mp.frame_w, mp.frame_h, 0.0, 0.0];
+    for r in 0..3 {
+        rec[2 + r] = row4(mp.lms_from_rgb[r]);
+        rec[5 + r] = row4(mp.rgb_from_lms[r]);
+    }
+    let mut rasters: Vec<(*const masks::Raster, u32)> = Vec::new();
+    for (i, m) in mp.masks.iter().enumerate() {
+        let b = 8 + i * 30;
+        let a = &m.adjust;
+        rec[b] = [
+            m.components.len() as f32,
+            m.amount,
+            a.wb.is_some() as u8 as f32,
+            a.exposure,
+        ];
+        rec[b + 1] = [a.contrast, a.shadows, a.highlights, a.whites];
+        rec[b + 2] = [a.blacks, a.clarity, a.texture, a.saturation];
+        let wbm =
+            a.wb.unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        for r in 0..3 {
+            rec[b + 3 + r] = row4(wbm[r]);
+        }
+        for (k, c) in m.components.iter().enumerate() {
+            let at = b + 6 + 3 * k;
+            let mode = match c.mode {
+                Combine::Add => 0.0,
+                Combine::Subtract => 1.0,
+                Combine::Intersect => 2.0,
+            };
+            let inv = c.invert as u8 as f32;
+            let (t, c1, c2) = match &c.shape {
+                PreparedShape::Linear { p0, d, inv_len2 } => {
+                    (0.0, [p0[0], p0[1], d[0], d[1]], [*inv_len2, 0.0, 0.0, 0.0])
+                }
+                PreparedShape::Radial {
+                    c,
+                    cos,
+                    sin,
+                    inv_rx,
+                    inv_ry,
+                    inner,
+                } => (
+                    1.0,
+                    [c[0], c[1], *cos, *sin],
+                    [*inv_rx, *inv_ry, *inner, 0.0],
+                ),
+                PreparedShape::Raster(r) => {
+                    let ptr = std::sync::Arc::as_ptr(r);
+                    let off = match rasters.iter().find(|(p, _)| *p == ptr) {
+                        Some((_, o)) => *o,
+                        None => {
+                            let o = data.len() as u32;
+                            data.extend_from_slice(&r.data);
+                            rasters.push((ptr, o));
+                            o
+                        }
+                    };
+                    (
+                        2.0,
+                        [off as f32, r.width as f32, r.height as f32, 0.0],
+                        [0.0; 4],
+                    )
+                }
+                PreparedShape::Luminance { lo, hi, soft } => {
+                    (3.0, [*lo, *hi, *soft, 0.0], [0.0; 4])
+                }
+                PreparedShape::Color { colors, tol } => {
+                    let off = data.len() as f32;
+                    for q in colors {
+                        data.extend_from_slice(q);
+                    }
+                    (4.0, [off, colors.len() as f32, *tol, 0.0], [0.0; 4])
+                }
+                PreparedShape::Nothing => (5.0, [0.0; 4], [0.0; 4]),
+            };
+            rec[at] = [t, mode, inv, 0.0];
+            rec[at + 1] = c1;
+            rec[at + 2] = c2;
+        }
+    }
+    if data.is_empty() {
+        data.push(0.0);
+    }
+    (rec, data)
 }
 
 /// Records are placed at this stride so each can be bound with a dynamic offset.
@@ -198,11 +300,16 @@ pub struct GpuFrame {
     params: wgpu::Buffer,
     look: wgpu::Buffer,
     passes: wgpu::Buffer,
+    src: wgpu::Buffer,
+    pool: wgpu::Buffer,
     lut: wgpu::Buffer,
     lut_state: Mutex<Option<Vec<[f32; 2]>>>,
     out: wgpu::Buffer,
     readback: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    /// Packed mask records (fixed size) and their raster / colour data (grows as needed).
+    masks: wgpu::Buffer,
+    mask_data: Mutex<wgpu::Buffer>,
+    bind_group: Mutex<wgpu::BindGroup>,
     /// Renders of one frame share its buffers, so they run one at a time.
     busy: Mutex<()>,
 }
@@ -290,6 +397,8 @@ impl Gpu {
             buffer(4, storage(false), false),
             buffer(5, uniform, false),
             buffer(6, uniform, true),
+            buffer(7, storage(true), false),
+            buffer(8, storage(true), false),
         ];
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("develop"),
@@ -320,6 +429,31 @@ impl Gpu {
             pipelines,
             name: format!("{} ({:?})", info.name, info.backend),
             warmed: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Bind group over buffers in binding order 0..=8.
+    fn bind_group(&self, b: &[&wgpu::Buffer; 9]) -> wgpu::BindGroup {
+        let entries: Vec<wgpu::BindGroupEntry> = b
+            .iter()
+            .enumerate()
+            .map(|(i, buf)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: if i == 6 {
+                    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: buf,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(std::mem::size_of::<PassUniform>() as u64),
+                    })
+                } else {
+                    buf.as_entire_binding()
+                },
+            })
+            .collect();
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("develop"),
+            layout: &self.layout,
+            entries: &entries,
         })
     }
 
@@ -382,31 +516,11 @@ impl Gpu {
             U::UNIFORM | U::COPY_DST,
         );
         let passes = buffer("passes", PASS_STRIDE * MAX_PASSES, U::UNIFORM | U::COPY_DST);
-        fn whole(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
-            b.as_entire_binding()
-        }
-        let entries = [
-            (0, whole(&params)),
-            (1, whole(&src)),
-            (2, whole(&pool)),
-            (3, whole(&lut)),
-            (4, whole(&out)),
-            (5, whole(&look)),
-            (
-                6,
-                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &passes,
-                    offset: 0,
-                    size: std::num::NonZeroU64::new(std::mem::size_of::<PassUniform>() as u64),
-                }),
-            ),
-        ]
-        .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
-        let bind_group = d.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("develop"),
-            layout: &self.layout,
-            entries: &entries,
-        });
+        let masks_buf = buffer("masks", MASK_RECORDS as u64 * 16, U::STORAGE | U::COPY_DST);
+        let mask_data = buffer("mask data", 16, U::STORAGE | U::COPY_DST);
+        let bind_group = self.bind_group(&[
+            &params, &src, &pool, &lut, &out, &look, &passes, &masks_buf, &mask_data,
+        ]);
         let frame_out = GpuFrame {
             width: w as u32,
             height: h as u32,
@@ -422,11 +536,15 @@ impl Gpu {
             params,
             look,
             passes,
+            src,
+            pool,
             lut,
             lut_state: Mutex::new(None),
             out,
             readback,
-            bind_group,
+            masks: masks_buf,
+            mask_data: Mutex::new(mask_data),
+            bind_group: Mutex::new(bind_group),
             busy: Mutex::new(()),
         };
         // The first dispatch of each pipeline pays a one-off driver cost (~70 ms on an M1). Pay it
@@ -463,7 +581,13 @@ impl Gpu {
         let tp = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
         let (sev, hev) = tone::local_tone_amounts(s.shadows, s.highlights);
         let use_sh = s.shadows != 0.0 || s.highlights != 0.0;
-        let (use_cl, use_tx) = (s.clarity != 0.0, s.texture != 0.0);
+        let mask_geo =
+            geometry::GeometryParams::new(&s, f.width as usize, f.height as usize, f.orientation);
+        let mp = MaskParams::new(&s.masks, &s.rasters, mask_geo.frame_w, mask_geo.frame_h);
+        let (use_cl, use_tx) = (
+            s.clarity != 0.0 || mp.needs_clarity,
+            s.texture != 0.0 || mp.needs_texture,
+        );
         let geo =
             geometry::GeometryParams::new(&s, f.width as usize, f.height as usize, f.orientation);
         let orientation = geo.orientation;
@@ -599,6 +723,26 @@ impl Gpu {
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));
         let fx = effects::EffectsParams::new(&s, ow as usize, oh as usize);
         let lu = LookUniform::new(&look::LookParams::new(&s), &fx);
+        let (mrec, mdata) = pack_masks(&mp);
+        self.queue
+            .write_buffer(&f.masks, 0, bytemuck::cast_slice(&mrec));
+        {
+            let mut md = f.mask_data.lock().unwrap();
+            let need = (mdata.len() * 4) as u64;
+            if md.size() < need {
+                *md = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("mask data"),
+                    size: need.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                *f.bind_group.lock().unwrap() = self.bind_group(&[
+                    &f.params, &f.src, &f.pool, &f.lut, &f.out, &f.look, &f.passes, &f.masks, &md,
+                ]);
+            }
+            self.queue
+                .write_buffer(&md, 0, bytemuck::cast_slice(&mdata));
+        }
         self.queue.write_buffer(&f.look, 0, bytemuck::bytes_of(&lu));
 
         // The pass list.
@@ -745,10 +889,11 @@ impl Gpu {
 
         let mut enc = self.device.create_command_encoder(&Default::default());
         {
+            let bind_group = f.bind_group.lock().unwrap();
             let mut pass = enc.begin_compute_pass(&Default::default());
             for (i, (kern, _, items)) in list.iter().enumerate() {
                 pass.set_pipeline(&self.pipelines[*kern as usize]);
-                pass.set_bind_group(0, &f.bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
+                pass.set_bind_group(0, &*bind_group, &[(i as u64 * PASS_STRIDE) as u32]);
                 let (gx, gy) = workgroups(*items);
                 pass.dispatch_workgroups(gx, gy, 1);
             }

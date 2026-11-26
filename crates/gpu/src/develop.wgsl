@@ -70,6 +70,10 @@ struct Look {
 };
 @group(0) @binding(5) var<uniform> L: Look;
 @group(0) @binding(6) var<uniform> Q: Pass;
+// Masks (masks.rs), packed by the host: header (count, needs display, needs saturation; frame size;
+// OKLab matrices), then 30 vec4 per mask. Raster and colour data in MD.
+@group(0) @binding(7) var<storage, read> M: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> MD: array<f32>;
 
 const CLIP: f32 = 0.985;
 const MID_GREY: f32 = 0.18;
@@ -573,6 +577,99 @@ fn effects(c0: vec3<f32>, x: u32, y: u32, w: u32, h: u32) -> vec3<f32> {
     return c;
 }
 
+// --- Masks (masks.rs) ---------------------------------------------------------------------------
+
+fn mask_oklab(d: vec3<f32>) -> vec3<f32> {
+    let lms = vec3<f32>(dot(M[2].xyz, d), dot(M[3].xyz, d), dot(M[4].xyz, d));
+    return LMS_TO_LAB * vec3<f32>(cbrt_(lms.x), cbrt_(lms.y), cbrt_(lms.z));
+}
+
+// Oriented-frame position of sensor pixel (x, y) (masks::frame_position).
+fn frame_pos(x: u32, y: u32) -> vec2<f32> {
+    let sx = f32(x) + 0.5;
+    let sy = f32(y) + 0.5;
+    let sw = f32(P.dims.x);
+    let sh = f32(P.dims.y);
+    switch P.dims2.z {
+        case 2u: { return vec2<f32>(sw - sx, sy); }
+        case 3u: { return vec2<f32>(sw - sx, sh - sy); }
+        case 4u: { return vec2<f32>(sx, sh - sy); }
+        case 5u: { return vec2<f32>(sy, sx); }
+        case 6u: { return vec2<f32>(sh - sy, sx); }
+        case 7u: { return vec2<f32>(sh - sy, sw - sx); }
+        case 8u: { return vec2<f32>(sy, sw - sx); }
+        default: { return vec2<f32>(sx, sy); }
+    }
+}
+
+fn raster_sample(off: u32, w: u32, h: u32, fx: f32, fy: f32) -> f32 {
+    let x = clamp(fx * f32(w) - 0.5, 0.0, f32(w - 1u));
+    let y = clamp(fy * f32(h) - 0.5, 0.0, f32(h - 1u));
+    let x0 = u32(floor(x));
+    let y0 = u32(floor(y));
+    let x1 = min(x0 + 1u, w - 1u);
+    let y1 = min(y0 + 1u, h - 1u);
+    let tx = x - f32(x0);
+    let ty = y - f32(y0);
+    let top = MD[off + y0 * w + x0] * (1.0 - tx) + MD[off + y0 * w + x1] * tx;
+    let bot = MD[off + y1 * w + x0] * (1.0 - tx) + MD[off + y1 * w + x1] * tx;
+    return top * (1.0 - ty) + bot * ty;
+}
+
+fn mask_value(base: u32, p: vec2<f32>, display: vec3<f32>) -> f32 {
+    let n = u32(M[base].x);
+    var acc = 0.0;
+    var have_lab = false;
+    var lab = vec3<f32>(0.0);
+    for (var k = 0u; k < n; k++) {
+        let c0 = M[base + 6u + 3u * k];
+        let c1 = M[base + 7u + 3u * k];
+        let c2 = M[base + 8u + 3u * k];
+        var v = 0.0;
+        switch u32(c0.x) {
+            case 0u: {
+                let t = ((p.x - c1.x) * c1.z + (p.y - c1.y) * c1.w) * c2.x;
+                v = 1.0 - smoothstep_(0.0, 1.0, t);
+            }
+            case 1u: {
+                let dx = p.x - c1.x;
+                let dy = p.y - c1.y;
+                let u = (dx * c1.z + dy * c1.w) * c2.x;
+                let w = (-dx * c1.w + dy * c1.z) * c2.y;
+                v = 1.0 - smoothstep_(c2.z, 1.0, sqrt(u * u + w * w));
+            }
+            case 2u: {
+                v = raster_sample(u32(c1.x), u32(c1.y), u32(c1.z), p.x / M[1].x, p.y / M[1].y);
+            }
+            case 3u: {
+                let l = mask_oklab(display).x;
+                v = smoothstep_(c1.x - c1.z, c1.x, l) * (1.0 - smoothstep_(c1.y, c1.y + c1.z, l));
+            }
+            case 4u: {
+                if (!have_lab) { lab = mask_oklab(display); have_lab = true; }
+                let off = u32(c1.x);
+                for (var q = 0u; q < u32(c1.y); q++) {
+                    let t = vec3<f32>(MD[off + 3u * q], MD[off + 3u * q + 1u], MD[off + 3u * q + 2u]);
+                    let dd = 2.0 * sqrt((lab.y - t.y) * (lab.y - t.y) + (lab.z - t.z) * (lab.z - t.z)) + 0.5 * abs(lab.x - t.x);
+                    v = max(v, 1.0 - smoothstep_(c1.z * 0.5, c1.z, dd));
+                }
+            }
+            default: { v = 0.0; }
+        }
+        if (c0.z > 0.5) { v = 1.0 - v; }
+        if (k == 0u) {
+            if (u32(c0.y) == 0u) { acc = v; } else { acc = 0.0; }
+        } else {
+            switch u32(c0.y) {
+                case 0u: { acc = acc + v - acc * v; }
+                case 1u: { acc = acc * (1.0 - v); }
+                default: { acc = acc * v; }
+            }
+        }
+    }
+    return acc * M[base].y;
+}
+
 // Develop one sensor-space pixel (index j at (sx, sy)) up to display-linear values after the curve.
 fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
     let px = pool[P.offs.x + j];
@@ -584,6 +681,8 @@ fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
     let fx = (f32(sx) + 0.5) * inv;
     let fy = (f32(sy) + 0.5) * inv;
     var d = 0.0;
+    var cd = 0.0;
+    var td = 0.0;
     if (P.flags.x != 0u) {
         let m = sample_plane(P.offs.y, fx, fy);
         let b = m.x * l + m.y - P.tone.w;
@@ -593,15 +692,60 @@ fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
         let m = sample_plane(P.offs.z, fx, fy);
         let base = m.x * l + m.y;
         let mg = base - P.tone.w;
-        d += P.local.z * (l - base) * exp(-(mg * mg) / 8.0);
+        cd = (l - base) * exp(-(mg * mg) / 8.0);
+        d += P.local.z * cd;
     }
     if (P.flags.z != 0u) {
         let dt = l - pool[P.offs.w + j].w;
-        d += P.local.w * dt / (1.0 + abs(dt) / 0.35);
+        td = dt / (1.0 + abs(dt) / 0.35);
+        d += P.local.w * td;
     }
-    if (P.flags.x != 0u || P.flags.y != 0u || P.flags.z != 0u) { c *= exp2(d); }
+    if (P.local.x != 0.0 || P.local.y != 0.0 || P.local.z != 0.0 || P.local.w != 0.0) { c *= exp2(d); }
+
+    // Masks: scene-linear adjustments now, saturation after the colour stage.
+    var vals: array<f32, 16>;
+    let mcount = u32(M[0].x);
+    if (mcount > 0u) {
+        var display = c;
+        if (M[0].y > 0.5) { display = tone(c); }
+        let fp = frame_pos(sx, sy);
+        for (var i = 0u; i < mcount; i++) {
+            let base = 8u + i * 30u;
+            let v = mask_value(base, fp, display);
+            vals[i] = v;
+            if (v <= 0.0) { continue; }
+            let h0 = M[base];
+            let h1 = M[base + 1u];
+            let h2 = M[base + 2u];
+            if (h0.z > 0.5) {
+                let a = vec3<f32>(dot(M[base + 3u].xyz, c), dot(M[base + 4u].xyz, c), dot(M[base + 5u].xyz, c));
+                c += v * (a - c);
+            }
+            let y = max(luma(c), 1.0e-6);
+            let ll = log2(y / MID_GREY);
+            let g = h0.w + h1.x * ll
+                + h1.y * (1.0 - smoothstep_(-5.0, 0.5, ll))
+                + h1.z * smoothstep_(-0.5, 3.0, ll)
+                + h1.w * smoothstep_(1.5, 4.5, ll)
+                + h2.x * (1.0 - smoothstep_(-7.0, -3.0, ll))
+                + h2.y * cd + h2.z * td;
+            c *= exp2(v * g);
+        }
+    }
 
     var e = look(tone(c));
+    if (mcount > 0u && M[0].z > 0.5) {
+        var gain = 1.0;
+        for (var i = 0u; i < mcount; i++) {
+            gain *= max(1.0 + vals[i] * M[8u + i * 30u + 2u].w, 0.0);
+        }
+        if (gain != 1.0) {
+            let lab = mask_oklab(e);
+            let m = LAB_TO_LMS * vec3<f32>(lab.x, lab.y * gain, lab.z * gain);
+            let lms = m * m * m;
+            e = vec3<f32>(dot(M[5].xyz, lms), dot(M[6].xyz, lms), dot(M[7].xyz, lms));
+        }
+    }
     if (P.dims2.w != 0u) {
         for (var k = 0; k < 3; k++) {
             e[k] = srgb_decode(curve(srgb_encode(clamp(e[k], 0.0, 1.0))));

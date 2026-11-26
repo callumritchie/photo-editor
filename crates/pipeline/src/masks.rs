@@ -270,6 +270,27 @@ pub fn rasterise_brush(strokes: &[Stroke], aspect: f32) -> Raster {
     }
 }
 
+/// [`rasterise_brush`] with a small process-wide cache (keyed by the strokes' JSON and the aspect),
+/// so re-rendering while other sliders move does not rasterise again.
+pub fn brush_raster_cached(strokes: &[Stroke], aspect: f32) -> Arc<Raster> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Vec<(String, Arc<Raster>)>> = Mutex::new(Vec::new());
+    let key = format!(
+        "{aspect:.6}:{}",
+        serde_json::to_string(strokes).unwrap_or_default()
+    );
+    if let Some((_, r)) = CACHE.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return r.clone();
+    }
+    let r = Arc::new(rasterise_brush(strokes, aspect));
+    let mut c = CACHE.lock().unwrap();
+    c.push((key, r.clone()));
+    if c.len() > 8 {
+        c.remove(0);
+    }
+    r
+}
+
 /// A component prepared for evaluation (positions in oriented-frame pixels).
 #[derive(Debug, Clone)]
 pub enum PreparedShape {
@@ -448,7 +469,7 @@ impl MaskParams {
                                 }
                             }
                             Shape::Brush { strokes } => {
-                                PreparedShape::Raster(Arc::new(rasterise_brush(strokes, aspect)))
+                                PreparedShape::Raster(brush_raster_cached(strokes, aspect))
                             }
                             Shape::Raster { raster_id } => match rasters.get(raster_id) {
                                 Some(r) => PreparedShape::Raster(Arc::new(r.clone())),
