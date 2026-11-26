@@ -109,15 +109,21 @@ extension DevelopModel {
         return m.components[safe: activeComponent]?.shape
     }
 
-    // Brush painting in frame fractions.
-    func beginStroke(_ p: CGPoint) {
+    /// View (output) fractions to mask (frame) fractions, and back.
+    func toFrame(_ p: CGPoint) -> CGPoint { preview?.mapPoints(settings, toFrame: true, [p]).first ?? p }
+    func toView(_ pts: [CGPoint]) -> [CGPoint] { preview?.mapPoints(settings, toFrame: false, pts) ?? pts }
+
+    // Brush painting; points arrive in view fractions.
+    func beginStroke(_ viewPoint: CGPoint) {
+        let p = toFrame(viewPoint)
         let s = StrokeModel(points: [[p.x, p.y]], size: brushSize, feather: brushFeather, flow: brushFlow, erase: brushErase)
         updateShape(commitNow: false) { shape in
             if case .brush(var strokes) = shape { strokes.append(s); shape = .brush(strokes: strokes) }
         }
     }
 
-    func extendStroke(_ p: CGPoint) {
+    func extendStroke(_ viewPoint: CGPoint) {
+        let p = toFrame(viewPoint)
         updateShape(commitNow: false) { shape in
             if case .brush(var strokes) = shape, !strokes.isEmpty {
                 let last = strokes[strokes.count - 1].points.last ?? [p.x, p.y]
@@ -130,8 +136,9 @@ extension DevelopModel {
         }
     }
 
-    func pickColor(at p: CGPoint) {
-        guard let preview, let lab = preview.pickColor(settings.withoutGeometry, fx: p.x, fy: p.y) else { return }
+    func pickColor(at viewPoint: CGPoint) {
+        let p = toFrame(viewPoint)
+        guard let preview, let lab = preview.pickColor(settings, fx: p.x, fy: p.y) else { return }
         updateShape(commitNow: true) { shape in
             if case .color(var colors, let tol) = shape { colors.append(lab); shape = .color(colors: colors, tolerance: tol) }
         }
@@ -340,36 +347,85 @@ struct MaskCanvas: View {
     }
 
     @ViewBuilder private func handles(_ shape: ShapeModel, _ size: CGSize) -> some View {
-        let pt = { (x: Double, y: Double) in CGPoint(x: x * size.width, y: y * size.height) }
+        // Shapes live in mask (frame) fractions; the view shows the output (cropped, straightened).
+        let view = { (pts: [CGPoint]) in model.toView(pts).map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) } }
+        let frame = { (p: CGPoint) in model.toFrame(p) }
         switch shape {
         case .linear(let x0, let y0, let x1, let y1):
-            Path { p in p.move(to: pt(x0, y0)); p.addLine(to: pt(x1, y1)) }
+            let v = view([CGPoint(x: x0, y: y0), CGPoint(x: x1, y: y1)])
+            Path { p in p.move(to: v[0]); p.addLine(to: v[1]) }
                 .stroke(Color.white, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 .allowsHitTesting(false)
-            handle(pt(x0, y0), filled: true) { d in
-                model.updateShape(commitNow: false) { if case .linear(_, _, let a, let b) = $0 { $0 = .linear(x0: d.x, y0: d.y, x1: a, y1: b) } }
+            handle(v[0], filled: true) { d in
+                let f = frame(d)
+                model.updateShape(commitNow: false) { if case .linear(_, _, let a, let b) = $0 { $0 = .linear(x0: f.x, y0: f.y, x1: a, y1: b) } }
             }
-            handle(pt(x1, y1), filled: false) { d in
-                model.updateShape(commitNow: false) { if case .linear(let a, let b, _, _) = $0 { $0 = .linear(x0: a, y0: b, x1: d.x, y1: d.y) } }
+            handle(v[1], filled: false) { d in
+                let f = frame(d)
+                model.updateShape(commitNow: false) { if case .linear(let a, let b, _, _) = $0 { $0 = .linear(x0: a, y0: b, x1: f.x, y1: f.y) } }
             }
         case .radial(let cx, let cy, let rx, let ry, let angle, let feather):
+            // Centre, end of the first axis, end of the second axis, and a rotation handle beyond the
+            // first, in frame fractions (radii are fractions of the frame's width / height).
+            let aspect = model.frameAspect
+            let a = angle * .pi / 180
+            let c = CGPoint(x: cx, y: cy)
+            let pa = CGPoint(x: cx + rx * cos(a), y: cy + rx * aspect * sin(a))
+            let pb = CGPoint(x: cx - ry / aspect * sin(a), y: cy + ry * cos(a))
+            let pr = CGPoint(x: cx + 1.3 * rx * cos(a), y: cy + 1.3 * rx * aspect * sin(a))
+            let v = view([c, pa, pb, pr])
+            let la = hypot(v[1].x - v[0].x, v[1].y - v[0].y), lb = hypot(v[2].x - v[0].x, v[2].y - v[0].y)
+            let rot = atan2(v[1].y - v[0].y, v[1].x - v[0].x)
             Ellipse()
                 .stroke(Color.white, lineWidth: 1)
-                .frame(width: rx * 2 * size.width, height: ry * 2 * size.height)
-                .position(pt(cx, cy))
+                .frame(width: la * 2, height: lb * 2)
+                .rotationEffect(.radians(rot))
+                .position(v[0])
                 .allowsHitTesting(false)
-            handle(pt(cx, cy), filled: true) { d in
-                model.updateShape(commitNow: false) { $0 = .radial(cx: d.x, cy: d.y, rx: rx, ry: ry, angle: angle, feather: feather) }
+            Path { p in p.move(to: v[1]); p.addLine(to: v[3]) }
+                .stroke(Color.white.opacity(0.7), lineWidth: 1)
+                .allowsHitTesting(false)
+            // Distances in frame pixels (frame height = 1 unit, width = aspect units).
+            let px = { (p: CGPoint) in CGPoint(x: (p.x - cx) * aspect, y: p.y - cy) }
+            handle(v[0], filled: true) { d in
+                let f = frame(d)
+                model.updateShape(commitNow: false) { $0 = .radial(cx: f.x, cy: f.y, rx: rx, ry: ry, angle: angle, feather: feather) }
             }
-            handle(pt(cx + rx, cy), filled: false) { d in
-                model.updateShape(commitNow: false) { $0 = .radial(cx: cx, cy: cy, rx: max(0.01, abs(d.x - cx)), ry: ry, angle: angle, feather: feather) }
+            handle(v[1], filled: false) { d in
+                let q = px(frame(d))
+                model.updateShape(commitNow: false) { $0 = .radial(cx: cx, cy: cy, rx: max(0.01, hypot(q.x, q.y) / aspect), ry: ry, angle: angle, feather: feather) }
             }
-            handle(pt(cx, cy + ry), filled: false) { d in
-                model.updateShape(commitNow: false) { $0 = .radial(cx: cx, cy: cy, rx: rx, ry: max(0.01, abs(d.y - cy)), angle: angle, feather: feather) }
+            handle(v[2], filled: false) { d in
+                let q = px(frame(d))
+                model.updateShape(commitNow: false) { $0 = .radial(cx: cx, cy: cy, rx: rx, ry: max(0.01, hypot(q.x, q.y)), angle: angle, feather: feather) }
+            }
+            rotationHandle(v[3]) { d in
+                let q = px(frame(d))
+                let deg = atan2(q.y, q.x) * 180 / .pi
+                model.updateShape(commitNow: false) { $0 = .radial(cx: cx, cy: cy, rx: rx, ry: ry, angle: deg, feather: feather) }
             }
         default:
             EmptyView()
         }
+    }
+
+    private func rotationHandle(_ at: CGPoint, onDrag: @escaping (CGPoint) -> Void) -> some View {
+        GeometryReader { geo in
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(Color.black.opacity(0.5)))
+                .position(at)
+                .gesture(DragGesture(coordinateSpace: .named("maskCanvas"))
+                    .onChanged { g in
+                        let s = geo.size
+                        onDrag(CGPoint(x: g.location.x / s.width, y: g.location.y / s.height))
+                    }
+                    .onEnded { _ in model.commit(label: "Rotate Mask") })
+                .help("Drag to rotate")
+        }
+        .coordinateSpace(name: "maskCanvas")
     }
 
     private func handle(_ at: CGPoint, filled: Bool, onDrag: @escaping (CGPoint) -> Void) -> some View {

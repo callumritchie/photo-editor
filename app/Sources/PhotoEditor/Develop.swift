@@ -140,7 +140,6 @@ final class DevelopModel: ObservableObject {
         rendering = true
         var s = settings
         if cropping { s.crop = .full }
-        if maskEditing { s = s.withoutGeometry }
         let overlayIndex = (maskEditing && showOverlay) ? selectedMask : nil
         Task {
             let t0 = Date()

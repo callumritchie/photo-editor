@@ -121,14 +121,18 @@ impl GeometryParams {
     /// channel `c`.
     #[inline]
     pub fn source(&self, x: usize, y: usize, c: usize) -> (f32, f32) {
+        self.source_at(x as f32, y as f32, c)
+    }
+
+    /// [`source`](Self::source) for a continuous output position (pixel indices; centres at +0.5).
+    #[inline]
+    pub fn source_at(&self, x: f32, y: f32, c: usize) -> (f32, f32) {
         let (fw, fh) = (self.frame_w as f32, self.frame_h as f32);
         // 1. crop -> corrected frame.
-        let xt = (self.crop[0]
-            + (x as f32 + 0.5) / self.out_w as f32 * (self.crop[2] - self.crop[0]))
-            * fw;
-        let yt = (self.crop[1]
-            + (y as f32 + 0.5) / self.out_h as f32 * (self.crop[3] - self.crop[1]))
-            * fh;
+        let xt =
+            (self.crop[0] + (x + 0.5) / self.out_w as f32 * (self.crop[2] - self.crop[0])) * fw;
+        let yt =
+            (self.crop[1] + (y + 0.5) / self.out_h as f32 * (self.crop[3] - self.crop[1])) * fh;
         // 2. straighten.
         let (cx, cy) = (xt - fw * 0.5, yt - fh * 0.5);
         let rx = cx * self.cos + cy * self.sin;
@@ -233,6 +237,66 @@ pub fn resample_region(
     (w, h, data)
 }
 
+impl GeometryParams {
+    /// The mapping used for output coordinates: with no geometry set, the output is the oriented frame.
+    pub fn output_mapping(&self) -> GeometryParams {
+        let mut q = *self;
+        if !q.active {
+            q.out_w = q.frame_w;
+            q.out_h = q.frame_h;
+            q.crop = [0.0, 0.0, 1.0, 1.0];
+        }
+        q
+    }
+
+    /// Mask (oriented-frame) position, in fractions, of an output position given in fractions.
+    pub fn output_to_frame(&self, u: f32, v: f32) -> (f32, f32) {
+        let q = self.output_mapping();
+        // Continuous output pixel position (source() takes pixel indices; subtract the centre offset).
+        let (ox, oy) = (u * q.out_w as f32 - 0.5, v * q.out_h as f32 - 0.5);
+        let (sx, sy) = q.source_at(ox, oy, 1);
+        let (fx, fy) = crate::masks::frame_position_at(sx, sy, q.src_w, q.src_h, q.orientation);
+        (fx / q.frame_w as f32, fy / q.frame_h as f32)
+    }
+
+    /// Output position (fractions) of a mask position (fractions): the inverse of
+    /// [`output_to_frame`](Self::output_to_frame), solved with Newton's method. Positions outside the
+    /// output come back outside 0..1.
+    pub fn frame_to_output(&self, fx: f32, fy: f32) -> (f32, f32) {
+        let q = self.output_mapping();
+        // Start from the crop-relative position (exact when only cropping).
+        let c = q.crop;
+        let mut u = ((fx - c[0]) / (c[2] - c[0]).max(1e-6)) as f64;
+        let mut v = ((fy - c[1]) / (c[3] - c[1]).max(1e-6)) as f64;
+        if q.orientation != 1 || !q.active {
+            u = fx as f64;
+            v = fy as f64;
+        }
+        let f = |u: f64, v: f64| {
+            let (a, b) = self.output_to_frame(u as f32, v as f32);
+            (a as f64, b as f64)
+        };
+        for _ in 0..20 {
+            let (a, b) = f(u, v);
+            let (ex, ey) = (a - fx as f64, b - fy as f64);
+            if ex.abs() < 1e-6 && ey.abs() < 1e-6 {
+                break;
+            }
+            let h = 1e-3;
+            let (a1, b1) = f(u + h, v);
+            let (a2, b2) = f(u, v + h);
+            let (j11, j21, j12, j22) = ((a1 - a) / h, (b1 - b) / h, (a2 - a) / h, (b2 - b) / h);
+            let det = j11 * j22 - j12 * j21;
+            if det.abs() < 1e-12 {
+                break;
+            }
+            u -= (j22 * ex - j12 * ey) / det;
+            v -= (-j21 * ex + j11 * ey) / det;
+        }
+        (u as f32, v as f32)
+    }
+}
+
 /// Scale of the largest centred rectangle with the frame's aspect ratio that fits inside the frame
 /// rotated by `angle_deg` (for auto-cropping when straightening).
 pub fn straighten_fit(w: f32, h: f32, angle_deg: f32) -> f32 {
@@ -306,6 +370,38 @@ mod tests {
         };
         let (_, _, out) = resample(&img, &GeometryParams::new(&s, w, h, 1));
         assert!(out.chunks(3).all(|p| p[2] > 0.99), "no black corners");
+    }
+
+    #[test]
+    fn output_and_frame_positions_invert_each_other() {
+        for s in [
+            Settings::default(),
+            serde_json::from_value(serde_json::json!({
+                "crop": {"left": 0.1, "top": 0.2, "right": 0.8, "bottom": 0.9, "angle": 6},
+                "transform": {"vertical": 30, "horizontal": -15, "scale": 90},
+                "lens": {"distortion": 40}
+            }))
+            .unwrap(),
+        ] {
+            for code in [1u8, 6] {
+                let p = GeometryParams::new(&s, 600, 400, code);
+                for (u, v) in [(0.5, 0.5), (0.1, 0.2), (0.9, 0.75)] {
+                    let (fx, fy) = p.output_to_frame(u, v);
+                    let (u2, v2) = p.frame_to_output(fx, fy);
+                    assert!(
+                        (u - u2).abs() < 1e-4 && (v - v2).abs() < 1e-4,
+                        "{code} {u},{v} -> {fx},{fy} -> {u2},{v2}"
+                    );
+                }
+            }
+        }
+        // Only cropping: a plain rescale.
+        let s: Settings = serde_json::from_value(
+            serde_json::json!({"crop": {"left": 0.5, "top": 0.0, "right": 1.0, "bottom": 1.0}}),
+        )
+        .unwrap();
+        let (fx, fy) = GeometryParams::new(&s, 600, 400, 1).output_to_frame(0.5, 0.5);
+        assert!((fx - 0.75).abs() < 1e-4 && (fy - 0.5).abs() < 1e-4);
     }
 
     #[test]

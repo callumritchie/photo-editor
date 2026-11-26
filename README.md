@@ -63,7 +63,8 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   to erase), luminance and colour ranges (pick colours on the photo), Select Subject (Apple's on-device Vision framework)
   and Select Sky (a heuristic that works for ordinary daylight skies). Combine parts with add / subtract / intersect and
   invert; each mask has its own temperature, tint, exposure, contrast, highlights, shadows, whites, blacks, texture,
-  clarity and saturation. A red overlay shows the selected mask; masks are edited on the uncropped photo.
+  clarity and saturation. A red overlay shows the selected mask on the cropped, straightened photo (masks stay attached to the picture if you
+  re-crop later); radial gradients have a rotation handle.
 - **Organise:** collections and collection sets (drag photos onto a collection, or right-click › Add to Collection);
   smart collections built from rules (rating, flag, label, keywords, camera, lens, exposure, dates, file type, edited,
   …), which always stay up to date; hierarchical keywords (⌘K; type `Animals > Birds` for levels) shown in the

@@ -68,6 +68,8 @@ uint8_t *pe_image_select_sky(PeImage *img, uint32_t *w, uint32_t *hh);
 /* Mask overlay (8-bit grey over the oriented, uncropped preview frame) and colour picking (OKLab). */
 uint8_t *pe_image_mask_overlay(PeImage *img, const char *settings_json, uint32_t index, uint32_t *w, uint32_t *hh);
 bool pe_image_pick_color(PeImage *img, const char *settings_json, float fx, float fy, float *out_lab);
+/* Convert n (x, y) points in place between output fractions and mask (frame) fractions. */
+bool pe_image_map_points(PeImage *img, const char *settings_json, bool to_frame, float *pts, size_t n);
 
 /* 1:1 viewing: full-resolution output size, and a rectangle of it rendered at 1:1 (RGBA8). */
 bool pe_image_output_size(PeImage *img, const char *settings_json, uint32_t *w, uint32_t *hh);

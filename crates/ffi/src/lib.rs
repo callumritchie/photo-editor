@@ -994,6 +994,47 @@ pub unsafe extern "C" fn pe_image_render_region(
     bytes_out(rgba, ptr::null_mut())
 }
 
+/// Convert `n` points (x, y pairs, fractions) in place between output positions (after crop and
+/// geometry) and mask positions (fractions of the oriented, uncropped frame).
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_map_points(
+    img: *mut PeImage,
+    settings_json: *const c_char,
+    to_frame: bool,
+    pts: *mut f32,
+    n: usize,
+) -> bool {
+    let Some(img) = img.as_ref() else {
+        return false;
+    };
+    if pts.is_null() {
+        return false;
+    }
+    let s: pe_pipeline::Settings = match str_in(settings_json)
+        .map(serde_json::from_str::<pe_pipeline::Settings>)
+        .transpose()
+    {
+        Ok(s) => s.unwrap_or_default().clamped(),
+        Err(_) => return false,
+    };
+    let g = pe_pipeline::geometry::GeometryParams::new(
+        &s,
+        img.preview.width,
+        img.preview.height,
+        img.preview.orientation,
+    );
+    for p in std::slice::from_raw_parts_mut(pts, n * 2).chunks_mut(2) {
+        let (a, b) = if to_frame {
+            g.output_to_frame(p[0], p[1])
+        } else {
+            g.frame_to_output(p[0], p[1])
+        };
+        p[0] = a;
+        p[1] = b;
+    }
+    true
+}
+
 /// Select Sky on the preview (default rendering, oriented, uncropped). Returns an 8-bit grey raster
 /// (free with `pe_bytes_free(p, w*h)`), or NULL.
 #[no_mangle]

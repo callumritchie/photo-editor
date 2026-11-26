@@ -287,15 +287,15 @@ fn scene_stage_in(
     })
 }
 
-/// One mask's values over the oriented, uncropped frame (for showing it as an overlay): (width,
-/// height, values 0..1). `None` if there is no such (enabled) mask.
+/// One mask's values over the output picture (after crop and geometry), for showing it as an overlay:
+/// (width, height, values 0..1). `None` if there is no such (enabled) mask.
 pub fn mask_overlay(
     frame: &RawFrame,
     settings: &Settings,
     index: usize,
 ) -> Result<Option<(usize, usize, Vec<f32>)>, RenderError> {
     let settings = settings.clone().clamped();
-    // Only this mask matters; render without geometry so positions are frame positions.
+    // Only this mask matters.
     let only: Vec<masks::Mask> = settings
         .masks
         .get(index)
@@ -335,7 +335,10 @@ pub fn mask_overlay(
             row[x * 3..x * 3 + 3].copy_from_slice(&[v, v, v]);
         }
     });
-    let (ow, oh, data) = if st.geo.orientation != 1 {
+    // Into output coordinates, through the same geometry as the render.
+    let (ow, oh, data) = if st.geo.active {
+        geometry::resample(&vals, &st.geo)
+    } else if st.geo.orientation != 1 {
         orient::apply(st.geo.orientation, w, h, &vals)
     } else {
         (w, h, vals)

@@ -637,7 +637,13 @@ impl MaskParams {
 /// the mapping used by `orient` / `geometry`). `w`, `h`: sensor size.
 #[inline]
 pub fn frame_position(x: usize, y: usize, w: usize, h: usize, code: u8) -> (f32, f32) {
-    let (sx, sy, sw, sh) = (x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32);
+    frame_position_at(x as f32 + 0.5, y as f32 + 0.5, w, h, code)
+}
+
+/// [`frame_position`] for a continuous sensor position.
+#[inline]
+pub fn frame_position_at(sx: f32, sy: f32, w: usize, h: usize, code: u8) -> (f32, f32) {
+    let (sw, sh) = (w as f32, h as f32);
     match code {
         2 => (sw - sx, sy),
         3 => (sw - sx, sh - sy),

@@ -180,6 +180,16 @@ extension PreviewImage {
         }
     }
 
+    /// Convert points between output fractions (the view) and mask (frame) fractions.
+    func mapPoints(_ settings: DevelopSettings, toFrame: Bool, _ pts: [CGPoint]) -> [CGPoint] {
+        var buf = pts.flatMap { [Float($0.x), Float($0.y)] }
+        let ok = buf.withUnsafeMutableBufferPointer {
+            pe_image_map_points(handlePointer, settings.json, toFrame, $0.baseAddress, pts.count)
+        }
+        guard ok else { return pts }
+        return stride(from: 0, to: buf.count, by: 2).map { CGPoint(x: Double(buf[$0]), y: Double(buf[$0 + 1])) }
+    }
+
     func pickColor(_ settings: DevelopSettings, fx: Double, fy: Double) -> [Double]? {
         var out = [Float](repeating: 0, count: 3)
         let ok = out.withUnsafeMutableBufferPointer { pe_image_pick_color(handlePointer, settings.json, Float(fx), Float(fy), $0.baseAddress) }
