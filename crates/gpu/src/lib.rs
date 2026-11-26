@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use bytemuck::{Pod, Zeroable};
 use pe_colour::{ColorSpace, REC2020_TO_XYZ_D65};
-use pe_pipeline::{detail, local, look, tone, wb, Settings, WhiteBalance};
+use pe_pipeline::{detail, effects, local, look, tone, wb, Settings, WhiteBalance};
 use pe_raw::{Layout, RawFrame};
 use wgpu::util::DeviceExt;
 
@@ -81,10 +81,13 @@ struct LookUniform {
     band_bw: [f32; 8],
     grade: [[f32; 4]; 4],
     shape: [f32; 4],
+    fx1: [f32; 4],
+    fx2: [f32; 4],
+    fx3: [f32; 4],
 }
 
 impl LookUniform {
-    fn new(p: &look::LookParams) -> Self {
+    fn new(p: &look::LookParams, e: &effects::EffectsParams) -> Self {
         let g = |r: [f32; 3]| [r[0], r[1], r[2], 0.0];
         Self {
             flags: [
@@ -102,6 +105,9 @@ impl LookUniform {
             band_bw: p.band_bw,
             grade: p.grade.map(g),
             shape: [p.grade_width, p.grade_balance, 0.0, 0.0],
+            fx1: [e.amount, e.inner, e.width, e.highlights],
+            fx2: [e.sx, e.sy, e.p, e.vignette as u8 as f32],
+            fx3: [e.grain_amount, e.cell, e.roughness, e.grain as u8 as f32],
         }
     }
 }
@@ -565,7 +571,8 @@ impl Gpu {
         };
         self.queue
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));
-        let lu = LookUniform::new(&look::LookParams::new(&s));
+        let fx = effects::EffectsParams::new(&s, ow as usize, oh as usize);
+        let lu = LookUniform::new(&look::LookParams::new(&s), &fx);
         self.queue.write_buffer(&f.look, 0, bytemuck::bytes_of(&lu));
 
         // The pass list.

@@ -21,6 +21,7 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | 10 | Output | `lib.rs`, `tone.rs` | Rec.2020 → linear sRGB; out-of-gamut colours desaturated towards their luminance; sRGB transfer function |
 | 11 | Point curve | `tone.rs` | Monotone cubic (Fritsch & Carlson 1980) through user points on encoded 0–255 values |
 | 12 | Orientation | `orient.rs` | EXIF orientation codes 1–8 (rotate/flip) |
+| 13 | Effects | `effects.rs` | In output coordinates normalised to the frame. **Vignette:** distance with roundness (ellipse fitted to the frame, towards a circle, or a p-norm rounded rectangle), smoothstep between Midpoint and Feather; darkens (sparing highlights if asked) or lightens towards white. **Grain:** two octaves of hashed value noise (cell size a fraction of the short side, mixed by Roughness), applied as a midtone-weighted gain |
 
 ## Settings (`pe settings` prints the defaults)
 
@@ -32,6 +33,8 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | `toneCurve` | list of `[x, y]` on 0…255 | identity |
 | `texture`, `clarity`, `dehaze` | −100…100 | 0 |
 | `sharpening` | `amount` 0…150, `radius` 0.5…3 (sensor px), `detail` 0…100, `masking` 0…100 | 0, 1.0, 25, 0 |
+| `vignette` | `amount` −100…100, `midpoint` 0…100, `roundness` −100…100, `feather` 0…100, `highlights` 0…100 | 0, 50, 0, 50, 0 |
+| `grain` | `amount`, `size`, `roughness`: 0…100 | 0, 25, 50 |
 | `noiseReduction` | `luminance`, `detail`, `color`: 0…100 | 0, 50, 0 |
 | `vibrance`, `saturation` | −100…100 | 0 |
 | `hsl` | `{"hue":[8], "saturation":[8], "luminance":[8]}`, each −100…100, bands red, orange, yellow, green, aqua, blue, purple, magenta | 0 |

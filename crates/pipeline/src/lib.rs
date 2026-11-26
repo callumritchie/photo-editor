@@ -8,12 +8,13 @@
 //! 5. contrast, filmic display transform (whites), black level; colour (mixer, vibrance/saturation,
 //!    black and white, grading)
 //! 6. Rec.2020 -> linear sRGB, gamut mapping, sRGB encoding
-//! 7. point curve (encoded values), orientation
+//! 7. point curve (encoded values), orientation; effects (vignette, grain)
 //!
 //! `pe-gpu` implements the same stages for linear-RGB frames and is tested against this path.
 
 pub mod demosaic;
 pub mod detail;
+pub mod effects;
 pub mod filter;
 pub mod local;
 pub mod look;
@@ -23,8 +24,8 @@ pub mod tone;
 pub mod wb;
 
 pub use settings::{
-    Demosaic, GradeWheel, Grading, Hsl, NoiseReduction, Settings, Sharpening, Treatment,
-    WhiteBalance, HUE_BANDS, PROCESS_VERSION,
+    Demosaic, GradeWheel, Grading, Grain, Hsl, NoiseReduction, Settings, Sharpening, Treatment,
+    Vignette, WhiteBalance, HUE_BANDS, PROCESS_VERSION,
 };
 
 pub use pe_colour::ColorSpace;
@@ -240,11 +241,20 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
         px.copy_from_slice(&d);
     });
 
-    let (w, h, data) = if settings.apply_orientation {
+    let (w, h, mut data) = if settings.apply_orientation {
         orient::apply(frame.orientation, w, h, &data)
     } else {
         (w, h, data)
     };
+    // Effects work in output coordinates.
+    let fx = effects::EffectsParams::new(&settings, w, h);
+    if fx.enabled() {
+        data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+            for (x, px) in row.chunks_mut(3).enumerate() {
+                px.copy_from_slice(&fx.apply([px[0], px[1], px[2]], x, y, w, h, REC2020_LUMA));
+            }
+        });
+    }
     Ok(RgbImage {
         width: w,
         height: h,

@@ -32,12 +32,14 @@ pub enum Group {
     ColorGrading,
     Sharpening,
     NoiseReduction,
+    Vignette,
+    Grain,
     /// Technical processing choices (demosaic method, orientation handling). Not part of "looks".
     Processing,
 }
 
 impl Group {
-    pub const ALL: [Group; 16] = [
+    pub const ALL: [Group; 18] = [
         Group::WhiteBalance,
         Group::Exposure,
         Group::Contrast,
@@ -53,6 +55,8 @@ impl Group {
         Group::ColorGrading,
         Group::Sharpening,
         Group::NoiseReduction,
+        Group::Vignette,
+        Group::Grain,
         Group::Processing,
     ];
 
@@ -78,6 +82,8 @@ impl Group {
             Group::ColorGrading => "Color Grading",
             Group::Sharpening => "Sharpening",
             Group::NoiseReduction => "Noise Reduction",
+            Group::Vignette => "Vignette",
+            Group::Grain => "Grain",
             Group::Processing => "Processing",
         }
     }
@@ -100,6 +106,8 @@ impl Group {
             Group::ColorGrading => &["grading"],
             Group::Sharpening => &["sharpening"],
             Group::NoiseReduction => &["noiseReduction"],
+            Group::Vignette => &["vignette"],
+            Group::Grain => &["grain"],
             Group::Processing => &["demosaic", "applyOrientation"],
         }
     }
@@ -357,6 +365,62 @@ fn build_params() -> Vec<ParamSpec> {
         "Color",
         Group::NoiseReduction,
         "Noise Reduction",
+    ));
+    let e = |key: &str, label: &str, group, sub, min: f32, default: f32| ParamSpec {
+        min,
+        default,
+        subsection: Some(sub),
+        ..spec(key, label, group, "Effects")
+    };
+    v.push(e(
+        "vignette.amount",
+        "Amount",
+        Group::Vignette,
+        "Vignette",
+        -100.0,
+        0.0,
+    ));
+    v.push(e(
+        "vignette.midpoint",
+        "Midpoint",
+        Group::Vignette,
+        "Vignette",
+        0.0,
+        50.0,
+    ));
+    v.push(e(
+        "vignette.roundness",
+        "Roundness",
+        Group::Vignette,
+        "Vignette",
+        -100.0,
+        0.0,
+    ));
+    v.push(e(
+        "vignette.feather",
+        "Feather",
+        Group::Vignette,
+        "Vignette",
+        0.0,
+        50.0,
+    ));
+    v.push(e(
+        "vignette.highlights",
+        "Highlights",
+        Group::Vignette,
+        "Vignette",
+        0.0,
+        0.0,
+    ));
+    v.push(e("grain.amount", "Amount", Group::Grain, "Grain", 0.0, 0.0));
+    v.push(e("grain.size", "Size", Group::Grain, "Grain", 0.0, 25.0));
+    v.push(e(
+        "grain.roughness",
+        "Roughness",
+        Group::Grain,
+        "Grain",
+        0.0,
+        50.0,
     ));
     v
 }

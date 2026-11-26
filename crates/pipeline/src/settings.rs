@@ -136,6 +136,56 @@ impl Default for NoiseReduction {
     }
 }
 
+/// Post-crop vignette.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Vignette {
+    /// -100..100: - darkens the edges, + lightens them.
+    pub amount: f32,
+    /// 0..100: how far from the centre it starts.
+    pub midpoint: f32,
+    /// -100..100: - towards a rounded rectangle, + towards a circle.
+    pub roundness: f32,
+    /// 0..100: softness of the transition.
+    pub feather: f32,
+    /// 0..100: spare bright areas when darkening.
+    pub highlights: f32,
+}
+
+impl Default for Vignette {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            midpoint: 50.0,
+            roundness: 0.0,
+            feather: 50.0,
+            highlights: 0.0,
+        }
+    }
+}
+
+/// Film-like grain.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Grain {
+    /// 0..100.
+    pub amount: f32,
+    /// 0..100: grain size relative to the image.
+    pub size: f32,
+    /// 0..100: mix of fine, irregular grain.
+    pub roughness: f32,
+}
+
+impl Default for Grain {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            size: 25.0,
+            roughness: 50.0,
+        }
+    }
+}
+
 /// Current rendering algorithm generation.
 pub const PROCESS_VERSION: u32 = 1;
 
@@ -178,6 +228,8 @@ pub struct Settings {
     pub grading: Grading,
     pub sharpening: Sharpening,
     pub noise_reduction: NoiseReduction,
+    pub vignette: Vignette,
+    pub grain: Grain,
     pub demosaic: Demosaic,
     /// Apply the camera orientation (rotate/flip) to the output.
     pub apply_orientation: bool,
@@ -206,6 +258,8 @@ impl Default for Settings {
             grading: Grading::default(),
             sharpening: Sharpening::default(),
             noise_reduction: NoiseReduction::default(),
+            vignette: Vignette::default(),
+            grain: Grain::default(),
             demosaic: Demosaic::Auto,
             apply_orientation: true,
         }
@@ -243,6 +297,16 @@ impl Settings {
         sh.radius = sh.radius.clamp(0.5, 3.0);
         sh.detail = sh.detail.clamp(0.0, 100.0);
         sh.masking = sh.masking.clamp(0.0, 100.0);
+        let v = &mut self.vignette;
+        v.amount = v.amount.clamp(-100.0, 100.0);
+        v.roundness = v.roundness.clamp(-100.0, 100.0);
+        for x in [&mut v.midpoint, &mut v.feather, &mut v.highlights] {
+            *x = x.clamp(0.0, 100.0);
+        }
+        let gr = &mut self.grain;
+        for x in [&mut gr.amount, &mut gr.size, &mut gr.roughness] {
+            *x = x.clamp(0.0, 100.0);
+        }
         let n = &mut self.noise_reduction;
         for v in [&mut n.luminance, &mut n.detail, &mut n.color] {
             *v = v.clamp(0.0, 100.0);

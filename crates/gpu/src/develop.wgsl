@@ -59,6 +59,9 @@ struct Look {
     band_bw: array<vec4<f32>, 2>,
     grade: array<vec4<f32>, 4>,        // (a, b, lightness) for shadows, midtones, highlights, global
     shape: vec4<f32>,                  // transition half-width, balance
+    fx1: vec4<f32>,                    // vignette amount, inner radius, width, highlights
+    fx2: vec4<f32>,                    // vignette axis scales, norm exponent, enabled
+    fx3: vec4<f32>,                    // grain amount, cell size (px), roughness, enabled
 };
 @group(0) @binding(5) var<uniform> L: Look;
 @group(0) @binding(6) var<uniform> Q: Pass;
@@ -500,6 +503,64 @@ fn oriented_source(dx: u32, dy: u32, code: u32) -> vec2<u32> {
 }
 
 
+// --- Effects (effects.rs) -----------------------------------------------------------------------
+
+fn lattice(ix: i32, iy: i32, octave: u32) -> f32 {
+    var h = (bitcast<u32>(ix) * 0x8DA6B343u) ^ (bitcast<u32>(iy) * 0xD8163841u) ^ (octave * 0xCB1AB31Fu);
+    h ^= h >> 15u;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12u;
+    h *= 0x297A2D39u;
+    h ^= h >> 15u;
+    return f32(h >> 8u) / 8388607.5 - 1.0;
+}
+
+fn value_noise(x: f32, y: f32, octave: u32) -> f32 {
+    let fx = floor(x);
+    let fy = floor(y);
+    let ix = i32(fx);
+    let iy = i32(fy);
+    let tx = x - fx;
+    let ty = y - fy;
+    let sx = tx * tx * (3.0 - 2.0 * tx);
+    let sy = ty * ty * (3.0 - 2.0 * ty);
+    let a = lattice(ix, iy, octave);
+    let b = lattice(ix + 1, iy, octave);
+    let c = lattice(ix, iy + 1, octave);
+    let d = lattice(ix + 1, iy + 1, octave);
+    let top = a + (b - a) * sx;
+    let bot = c + (d - c) * sx;
+    return top + (bot - top) * sy;
+}
+
+fn effects(c0: vec3<f32>, x: u32, y: u32, w: u32, h: u32) -> vec3<f32> {
+    var c = c0;
+    if (L.fx2.w > 0.5) {
+        let u = ((f32(x) + 0.5) / f32(w) * 2.0 - 1.0) * L.fx2.x;
+        let v = ((f32(y) + 0.5) / f32(h) * 2.0 - 1.0) * L.fx2.y;
+        let p = L.fx2.z;
+        let d = pow(pow(abs(u), p) + pow(abs(v), p), 1.0 / p);
+        let t = smoothstep_(L.fx1.y, L.fx1.y + L.fx1.z, d);
+        let amount = L.fx1.x;
+        if (amount < 0.0) {
+            let keep = L.fx1.w * smoothstep_(0.5, 1.0, luma(c));
+            c *= 1.0 + amount * t * (1.0 - keep);
+        } else {
+            c += max(vec3<f32>(1.0) - c, vec3<f32>(0.0)) * amount * t;
+        }
+    }
+    if (L.fx3.w > 0.5) {
+        let gx = f32(x) / L.fx3.y;
+        let gy = f32(y) / L.fx3.y;
+        let n1 = value_noise(gx, gy, 0u);
+        let n2 = value_noise(gx * 2.3, gy * 2.3, 1u);
+        let n = n1 + (n2 - n1) * L.fx3.z;
+        let l = sqrt(clamp(luma(c), 0.0, 1.0));
+        c *= 1.0 + L.fx3.x * n * 4.0 * l * (1.0 - l);
+    }
+    return c;
+}
+
 @compute @workgroup_size(256)
 fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = index(gid, nwg);
@@ -539,6 +600,7 @@ fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
             e[k] = srgb_decode(curve(srgb_encode(clamp(e[k], 0.0, 1.0))));
         }
     }
+    e = effects(e, i % ow, i / ow, ow, P.dims3.y);
     let lin = gamut_map(vec3<f32>(dot(P.o0.xyz, e), dot(P.o1.xyz, e), dot(P.o2.xyz, e)));
     let enc = vec3<f32>(srgb_encode(lin.x), srgb_encode(lin.y), srgb_encode(lin.z));
     let q = vec3<u32>(enc * 255.0 + vec3<f32>(0.5));

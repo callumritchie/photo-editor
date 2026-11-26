@@ -134,6 +134,36 @@ fn cases() -> Vec<(&'static str, Settings)> {
             },
         ),
         (
+            "vignette, grain",
+            Settings {
+                vignette: pe_pipeline::Vignette {
+                    amount: -70.0,
+                    midpoint: 30.0,
+                    roundness: -40.0,
+                    feather: 70.0,
+                    highlights: 50.0,
+                },
+                grain: pe_pipeline::Grain {
+                    amount: 60.0,
+                    size: 40.0,
+                    roughness: 70.0,
+                },
+                ..d.clone()
+            },
+        ),
+        (
+            "lighten vignette, round",
+            Settings {
+                vignette: pe_pipeline::Vignette {
+                    amount: 60.0,
+                    roundness: 80.0,
+                    ..Default::default()
+                },
+                apply_orientation: false,
+                ..d.clone()
+            },
+        ),
+        (
             "black & white, grading",
             Settings {
                 treatment: pe_pipeline::Treatment::Monochrome,
