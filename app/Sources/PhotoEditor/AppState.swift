@@ -1,5 +1,6 @@
 import CPeFFI
 import AppKit
+import UniformTypeIdentifiers
 import SwiftUI
 
 enum SidebarItem: Hashable {
@@ -231,6 +232,68 @@ final class AppState: ObservableObject {
         presets = (try? core?.presets()) ?? []
     }
 
+    /// Strength for the next preset applied (0...2), shared by the panel and the grid menu.
+    @Published var presetAmount: Double = 1.0
+    /// What an import of presets could not carry over (shown once).
+    @Published var presetImportNote: String?
+
+    func updatePreset(_ id: Int64, name: String, groups: [String], settings: DevelopSettings?) {
+        guard let core else { return }
+        do {
+            try core.updatePreset(id, name: name, groups: groups, settings: settings)
+            presets = try core.presets()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func duplicatePreset(_ id: Int64) {
+        guard let core else { return }
+        do {
+            try core.duplicatePreset(id)
+            presets = try core.presets()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Apply a preset to photos (the selection from the grid) at the current amount.
+    func applyPreset(_ id: Int64, to ids: [Int64]) {
+        runDevelop(ids, ["command": "applyPreset", "presetId": id, "amount": presetAmount])
+    }
+
+    /// Save a preset to a `.pepreset` file chosen by the user.
+    func exportPreset(_ p: PresetItem) {
+        guard let core else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(p.name).pepreset"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try core.exportPreset(p.id).write(to: url, atomically: true, encoding: .utf8) }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Import preset files (`.pepreset`, Adobe-style `.xmp`) chosen by the user.
+    func importPresets() {
+        guard let core else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.init(filenameExtension: "pepreset")!, .init(filenameExtension: "xmp")!]
+        guard panel.runModal() == .OK else { return }
+        var notes: [String] = []
+        var failures: [String] = []
+        for url in panel.urls {
+            do {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                let r = try core.importPreset(text: text, fileName: url.lastPathComponent)
+                if !r.unmapped.isEmpty {
+                    notes.append("\(r.preset.name): \(r.unmapped.joined(separator: ", "))")
+                }
+            } catch { failures.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+        }
+        presets = (try? core.presets()) ?? presets
+        var message: [String] = []
+        if !notes.isEmpty { message.append("Some settings have no equivalent here and were left out:\n" + notes.joined(separator: "\n")) }
+        if !failures.isEmpty { message.append("Not imported:\n" + failures.joined(separator: "\n")) }
+        if !message.isEmpty { presetImportNote = message.joined(separator: "\n\n") }
+    }
+
     func undo() { if mode == .loupe { developSession()?.undo() } }
     func redo() { if mode == .loupe { developSession()?.redo() } }
 
@@ -303,11 +366,12 @@ final class AppState: ObservableObject {
 
     // MARK: import
 
-    func runImport(sources: [URL], copyTo: URL?, template: String, skipDuplicates: Bool) {
+    func runImport(sources: [URL], copyTo: URL?, template: String, skipDuplicates: Bool, developPreset: Int64? = nil) {
         guard let core else { return }
         var mode: [String: Any] = ["mode": "add"]
         if let copyTo { mode = ["mode": "copy", "dest": copyTo.path, "template": template] }
-        let options: [String: Any] = ["mode": mode, "skipDuplicates": skipDuplicates, "recursive": true]
+        var options: [String: Any] = ["mode": mode, "skipDuplicates": skipDuplicates, "recursive": true]
+        if let developPreset { options["developPreset"] = developPreset }
         let paths = sources.map(\.path)
         importProgress = (0, 0)
         Task.detached(priority: .userInitiated) {

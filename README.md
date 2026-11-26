@@ -56,11 +56,17 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   for the crop overlay, with aspect presets), perspective, and lens corrections: automatic profiles for calibrated lenses (distortion, colour fringing and
   fall-off, from the Lensfun database) plus manual distortion, fringing and fall-off. Sliders update a live preview while you drag, rendered on the GPU (Metal)
   in about 5–15 ms; without a GPU the CPU takes 25–55 ms. Each release records one history step. ⌘Z/⇧⌘Z undo and redo; click any history step to return to it.
-  You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
+  You can also create snapshots and copy, paste or sync settings to
   selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.
   Click the photo (or press `Z`) to view it at 1:1 there; drag to pan, click or `Esc` to go back. The 1:1 view renders
   only the visible part, at full resolution on the GPU (demosaic included), and matches the exported file.
   `Esc` returns to the grid.
+- **Presets** (Presets section of the editing panel): save the photo's settings as a preset (choosing which groups to
+  include); hover a preset to preview it on the photo and click to apply it, at an **Amount** from 0 to 200 %; edit
+  (rename, change groups, update from the current photo), duplicate, export and delete from its menu. **Import…**
+  reads our own `.pepreset` files and Adobe-style `.xmp` presets (mapped onto our controls, so the look is similar
+  rather than identical; anything without an equivalent is listed). Apply a preset to many photos from the grid's
+  right-click menu, or to every photo as it is imported (Import sheet). `pe presets LIB [--import FILE…] [--export ID --to FILE]`.
 - **Masks** (Masks section of the editing panel): linear and radial gradients with on-photo handles, brush (paint, `⌥`
   to erase), luminance and colour ranges (pick colours on the photo), Select Subject (Apple's on-device Vision framework)
   and Select Sky (a heuristic that works for ordinary daylight skies). Combine parts with add / subtract / intersect and

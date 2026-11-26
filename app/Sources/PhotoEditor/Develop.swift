@@ -71,6 +71,8 @@ final class DevelopModel: ObservableObject {
     }
     @Published var error: String?
 
+    /// Settings shown instead of the photo's own while hovering a preset.
+    private var presetPreview: DevelopSettings?
     private(set) var preview: PreviewImage?
     private var rendering = false
     private var pending = false
@@ -138,7 +140,7 @@ final class DevelopModel: ObservableObject {
         guard let preview else { return }
         if rendering { pending = true; return }
         rendering = true
-        var s = settings
+        var s = presetPreview ?? settings
         if cropping { s.crop = .full }
         let overlayIndex = (maskEditing && showOverlay) ? selectedMask : nil
         Task {
@@ -180,7 +182,16 @@ final class DevelopModel: ObservableObject {
     func snapshot(named name: String) { run(["command": "createSnapshot", "name": name]) }
     func applySnapshot(_ id: Int64) { run(["command": "applySnapshot", "snapshotId": id]) }
     func deleteSnapshot(_ id: Int64) { run(["command": "deleteSnapshot", "snapshotId": id]) }
-    func applyPreset(_ id: Int64) { run(["command": "applyPreset", "presetId": id]) }
+    func applyPreset(_ id: Int64, amount: Double = 1) {
+        presetPreview = nil
+        run(["command": "applyPreset", "presetId": id, "amount": amount])
+    }
+
+    /// Show what a preset would do (on hover) without applying it; `nil` shows the photo again.
+    func previewPreset(_ id: Int64?, amount: Double) {
+        presetPreview = id.flatMap { try? core.previewPreset(image: item.id, preset: $0, amount: amount) }
+        requestRender()
+    }
 
     func setWhiteBalanceMode(_ mode: String) {
         switch mode {
@@ -202,6 +213,7 @@ struct DevelopPanel: View {
     @EnvironmentObject var app: AppState
     @ObservedObject var model: DevelopModel
     @State private var showSavePreset = false
+    @State private var editingPreset: PresetItem?
     // Development aid for UI snapshots: PE_PANEL_SECTIONS="Color Mixer,Color Grading".
     @State private var expanded: Set<String> = Set(
         ProcessInfo.processInfo.environment["PE_PANEL_SECTIONS"]?.split(separator: ",").map(String.init)
@@ -242,6 +254,7 @@ struct DevelopPanel: View {
         .frame(width: 300)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showSavePreset) { SavePresetSheet(settings: model.settings) }
+        .sheet(item: $editingPreset) { SavePresetSheet(settings: model.settings, editing: $0) }
     }
 
     private var header: some View {
@@ -283,13 +296,44 @@ struct DevelopPanel: View {
             Text("No presets yet").font(.caption).foregroundStyle(.secondary)
         }
         ForEach(app.presets) { p in
-            Button { model.applyPreset(p.id) } label: {
-                HStack { Text(p.name); Spacer(); Text("\(p.groups.count) groups").font(.caption).foregroundStyle(.secondary) }
+            Button { model.applyPreset(p.id, amount: app.presetAmount) } label: {
+                HStack {
+                    Text(p.name)
+                    Spacer()
+                    Text("\(p.groups.count) groups").font(.caption).foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .contextMenu { Button("Delete Preset", role: .destructive) { app.deletePreset(p.id) } }
+            .onHover { inside in model.previewPreset(inside ? p.id : nil, amount: app.presetAmount) }
+            .help("Click to apply; hover to preview")
+            .contextMenu {
+                Button("Apply") { model.applyPreset(p.id, amount: app.presetAmount) }
+                Button("Update with Current Settings") {
+                    app.updatePreset(p.id, name: p.name, groups: p.groups, settings: model.settings)
+                }
+                Button("Edit…") { editingPreset = p }
+                Button("Duplicate") { app.duplicatePreset(p.id) }
+                Button("Export…") { app.exportPreset(p) }
+                Divider()
+                Button("Delete Preset", role: .destructive) { app.deletePreset(p.id) }
+            }
         }
-        Button("Save Preset…") { showSavePreset = true }.controlSize(.small)
+        if !app.presets.isEmpty {
+            HStack {
+                Text("Amount")
+                Slider(value: $app.presetAmount, in: 0...2)
+                Text("\(Int((app.presetAmount * 100).rounded()))%").monospacedDigit().frame(width: 44, alignment: .trailing)
+            }
+            .font(.caption)
+            .onTapGesture(count: 2) { app.presetAmount = 1 }
+            .help("Strength of the next preset applied (double-click to reset to 100%)")
+        }
+        HStack {
+            Button("Save Preset…") { showSavePreset = true }
+            Button("Import…") { app.importPresets() }
+        }
+        .controlSize(.small)
     }
 
     @ViewBuilder private var snapshots: some View {
@@ -457,16 +501,22 @@ struct ParamSlider: View {
     }
 }
 
+/// Save a new preset from the photo's settings, or edit an existing one (`editing`).
 struct SavePresetSheet: View {
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
     let settings: DevelopSettings
+    var editing: PresetItem? = nil
     @State private var name = ""
     @State private var groups: Set<String> = Set(DevelopSchema.shared.groups.filter(\.look).map(\.id))
+    @State private var takeValues = false
 
     var body: some View {
         Form {
             TextField("Preset name", text: $name)
+            if editing != nil {
+                Toggle("Update values from this photo", isOn: $takeValues)
+            }
             Section("Include") {
                 ForEach(DevelopSchema.shared.groups, id: \.id) { g in
                     Toggle(g.label, isOn: Binding(
@@ -475,6 +525,9 @@ struct SavePresetSheet: View {
                 }
             }
         }
+        .onAppear {
+            if let e = editing { name = e.name; groups = Set(e.groups) }
+        }
         .formStyle(.grouped)
         .frame(width: 340)
         .toolbar {
@@ -482,7 +535,11 @@ struct SavePresetSheet: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
                     let ordered = DevelopSchema.shared.groups.map(\.id).filter { groups.contains($0) }
-                    app.savePreset(name: name, groups: ordered, settings: settings)
+                    if let e = editing {
+                        app.updatePreset(e.id, name: name, groups: ordered, settings: takeValues ? settings : nil)
+                    } else {
+                        app.savePreset(name: name, groups: ordered, settings: settings)
+                    }
                     dismiss()
                 }
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || groups.isEmpty)

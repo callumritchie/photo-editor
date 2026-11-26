@@ -225,6 +225,37 @@ extension Core {
     }
 
     func deletePreset(_ id: Int64) { _ = pe_catalog_delete_preset(handlePointer, id) }
+
+    /// Rename / regroup a preset; `settings` replaces its values when given.
+    @discardableResult
+    func updatePreset(_ id: Int64, name: String, groups: [String], settings: DevelopSettings?) throws -> PresetItem {
+        let g = String(data: try JSONEncoder().encode(groups), encoding: .utf8)!
+        return try decodeOwned(pe_catalog_update_preset_json(handlePointer, id, name, g, settings?.json))
+    }
+
+    @discardableResult
+    func duplicatePreset(_ id: Int64) throws -> PresetItem { try decodeOwned(pe_catalog_duplicate_preset(handlePointer, id)) }
+
+    /// A preset as `.pepreset` file text.
+    func exportPreset(_ id: Int64) throws -> String {
+        guard let p = pe_catalog_export_preset(handlePointer, id) else { throw CoreError.message("no response from core") }
+        defer { pe_string_free(p) }
+        let text = String(cString: p)
+        if let e = try? JSONDecoder().decode(ErrorReply.self, from: Data(text.utf8)) { throw CoreError.message(e.error) }
+        return text
+    }
+
+    struct ImportedPreset: Decodable { let preset: PresetItem; let unmapped: [String] }
+
+    /// Import `.pepreset` or Adobe-style `.xmp` text.
+    func importPreset(text: String, fileName: String) throws -> ImportedPreset {
+        try decodeOwned(pe_catalog_import_preset(handlePointer, text, fileName))
+    }
+
+    /// The settings a preset would give a photo at `amount` (0...2), without applying it.
+    func previewPreset(image: Int64, preset: Int64, amount: Double) throws -> DevelopSettings {
+        try decodeOwned(pe_catalog_preview_preset(handlePointer, image, preset, Float(amount)))
+    }
 }
 
 /// A raw decoded once and reduced for fast re-rendering while sliders move.

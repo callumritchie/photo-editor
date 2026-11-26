@@ -69,6 +69,18 @@ enum Cmd {
     },
     /// List folders in a catalog with image counts.
     Folders { catalog: PathBuf },
+    /// List develop presets; import preset files (.pepreset or Adobe-style .xmp) or export one.
+    Presets {
+        catalog: PathBuf,
+        /// Preset files to import.
+        #[arg(long)]
+        import: Vec<PathBuf>,
+        /// Id of a preset to export (with --to).
+        #[arg(long)]
+        export: Option<i64>,
+        #[arg(long)]
+        to: Option<PathBuf>,
+    },
     /// Run a develop command (JSON) on images and print their new state, e.g.
     /// `pe develop Lib.pecat 7 '{"command":"set","settings":{"exposure":0.5}}'`.
     Develop {
@@ -244,6 +256,44 @@ fn main() -> Result<()> {
         Cmd::Folders { catalog } => {
             for f in pe_catalog::Catalog::open(&catalog)?.folders()? {
                 println!("{:>6}  {:>6}  {}", f.id, f.image_count, f.path);
+            }
+            Ok(())
+        }
+        Cmd::Presets {
+            catalog,
+            import,
+            export,
+            to,
+        } => {
+            let mut cat = pe_catalog::Catalog::open(&catalog)?;
+            for f in &import {
+                let text = std::fs::read_to_string(f)?;
+                let name = f
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let r = cat.import_preset(&text, &name)?;
+                println!(
+                    "imported \"{}\" ({} groups)",
+                    r.preset.name,
+                    r.preset.groups.len()
+                );
+                if !r.unmapped.is_empty() {
+                    println!("  not carried over: {}", r.unmapped.join(", "));
+                }
+            }
+            if let Some(id) = export {
+                let text = cat.export_preset(id)?;
+                match &to {
+                    Some(p) => std::fs::write(p, text)?,
+                    None => print!("{text}"),
+                }
+            }
+            if import.is_empty() && export.is_none() {
+                for p in cat.presets()? {
+                    let groups: Vec<&str> = p.groups.iter().map(|g| g.label()).collect();
+                    println!("{:>4}  {}  [{}]", p.id, p.name, groups.join(", "));
+                }
             }
             Ok(())
         }

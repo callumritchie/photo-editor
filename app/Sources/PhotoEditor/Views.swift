@@ -189,6 +189,9 @@ struct ContentView: View {
         .alert("Error", isPresented: .constant(state.errorMessage != nil)) {
             Button("OK") { state.errorMessage = nil }
         } message: { Text(state.errorMessage ?? "") }
+        .alert("Presets Imported", isPresented: .constant(state.presetImportNote != nil)) {
+            Button("OK") { state.presetImportNote = nil }
+        } message: { Text(state.presetImportNote ?? "") }
     }
 }
 
@@ -494,6 +497,7 @@ struct ImportSheet: View {
     @State private var destination: URL?
     @State private var template = "%Y/%Y-%m-%d"
     @State private var skipDuplicates = true
+    @State private var developPreset: Int64?
 
     var body: some View {
         Form {
@@ -523,6 +527,12 @@ struct ImportSheet: View {
                 }
                 Toggle("Don't import suspected duplicates", isOn: $skipDuplicates)
             }
+            Section("Develop") {
+                Picker("Apply preset", selection: $developPreset) {
+                    Text("None").tag(Int64?.none)
+                    ForEach(state.presets) { Text($0.name).tag(Int64?.some($0.id)) }
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 520)
@@ -531,7 +541,7 @@ struct ImportSheet: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Import") {
                     state.runImport(sources: sources, copyTo: copy ? destination : nil, template: template,
-                                    skipDuplicates: skipDuplicates)
+                                    skipDuplicates: skipDuplicates, developPreset: developPreset)
                     dismiss()
                 }
                 .disabled(sources.isEmpty || (copy && destination == nil))

@@ -35,7 +35,7 @@ fn setup(n: u8) -> (tempfile::TempDir, Catalog, Vec<i64>) {
 fn look() -> Settings {
     serde_json::from_value(serde_json::json!({
         "exposure": 1.0, "contrast": 40, "vibrance": 30,
-        "toneCurve": [[0.0, 0.05], [0.5, 0.55], [1.0, 1.0]],
+        "toneCurve": [[0.0, 12.0], [128.0, 140.0], [255.0, 255.0]],
         "treatment": "monochrome"
     }))
     .unwrap()
@@ -269,7 +269,7 @@ fn adobe_style_xmp_presets_map_onto_our_settings() {
         }
     );
     assert_eq!(s.tone_curve.len(), 3);
-    assert!((s.tone_curve[0][1] - 20.0 / 255.0).abs() < 1e-6);
+    assert_eq!(s.tone_curve[0], [0.0, 20.0]);
     for g in [
         Group::Exposure,
         Group::Contrast,

@@ -455,7 +455,7 @@ pub fn map_xmp(x: &XmpPreset) -> (Settings, Vec<Group>, Vec<String>) {
         s.grading.balance = v;
         add(Group::ColorGrading, &mut groups);
     }
-    // Point curve (0..255 pairs); an identity curve means none.
+    // Point curve: 0..255 pairs, the same scale as ours; an identity curve means none.
     if !x.curve.is_empty() {
         used.push("ToneCurvePV2012".into());
         let pts: Vec<[f32; 2]> = x
@@ -463,10 +463,10 @@ pub fn map_xmp(x: &XmpPreset) -> (Settings, Vec<Group>, Vec<String>) {
             .iter()
             .filter_map(|p| {
                 let mut it = p.split(',').map(|v| v.trim().parse::<f32>().ok());
-                Some([it.next()?? / 255.0, it.next()?? / 255.0])
+                Some([it.next()??, it.next()??])
             })
             .collect();
-        let identity = pts.iter().all(|p| (p[0] - p[1]).abs() < 1e-3);
+        let identity = pts.iter().all(|p| (p[0] - p[1]).abs() < 0.5);
         if !identity && pts.len() >= 2 {
             s.tone_curve = pts;
         }

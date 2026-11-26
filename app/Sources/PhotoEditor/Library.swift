@@ -350,6 +350,10 @@ struct PhotoContextMenu: View {
             Button("Remove from This Collection") { state.removeFromCollection(cid, ids: ids) }
         }
         Button("Keywords…") { state.showKeywords = true }
+        Menu("Apply Preset") {
+            if state.presets.isEmpty { Text("No presets") }
+            ForEach(state.presets) { p in Button(p.name) { state.applyPreset(p.id, to: ids) } }
+        }
         Divider()
         Button("Create Virtual Copy") { state.createVirtualCopies(ids) }
         Divider()
