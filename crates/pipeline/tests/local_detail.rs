@@ -41,6 +41,9 @@ fn frame(w: usize, h: usize) -> RawFrame {
         scale: 1.0,
         lens: None,
         rendered: false,
+        exposure_bias: 0.0,
+        dng_warp: None,
+        own_lens_corrections: false,
     }
 }
 

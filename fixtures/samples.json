@@ -108,6 +108,54 @@
       "size_mb": 44.92,
       "licence": "CC0-1.0",
       "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "fujifilm-x-t4-lossless",
+      "make": "Fujifilm",
+      "model": "X-T4",
+      "mode": "14bit 14bit lossless compressed (3:2)",
+      "file": "Fujifilm-X-T4-lossless.raf",
+      "url": "https://raw.pixls.us/getfile.php/3914/nice/Fujifilm%20-%20X-T4%20-%2014bit%2014bit%20lossless%20compressed%20%283:2%29.RAF",
+      "sha256": "07ea642656074834ffe5c661870a612ffa2e80fc1218a05166ee966bbe5f6fae",
+      "size_mb": 26.65,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "fujifilm-x-pro2-uncompressed",
+      "make": "Fujifilm",
+      "model": "X-Pro2",
+      "mode": "14bit 14bit uncompressed (3:2)",
+      "file": "Fujifilm-X-Pro2-uncompressed.raf",
+      "url": "https://raw.pixls.us/getfile.php/1680/nice/Fujifilm%20-%20X-Pro2%20-%2014bit%2014bit%20uncompressed%20%283:2%29.RAF",
+      "sha256": "8cc12566e5c0fc676b713bb1612ce0510d47b1dc691e9a5a0bcf3799ad9b8af1",
+      "size_mb": 48.28,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "leica-q-typ-116",
+      "make": "Leica",
+      "model": "Q (Typ 116)",
+      "mode": "14bit (3:2)",
+      "file": "Leica-Q_Typ_116.dng",
+      "url": "https://raw.pixls.us/getfile.php/1797/nice/Leica%20-%20Q%20%28Typ%20116%29%20-%2014bit%20%283:2%29.DNG",
+      "sha256": "f7b2a6b6d7684536511cf2db2e2bfa46fae1ad7e52214093714f35e7ca60acbf",
+      "size_mb": 43.01,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
+    },
+    {
+      "id": "ricoh-gr-iii",
+      "make": "Ricoh",
+      "model": "GR III",
+      "mode": "14bit (3:2)",
+      "file": "Ricoh-GR_III.dng",
+      "url": "https://raw.pixls.us/getfile.php/3115/nice/Ricoh%20-%20GR%20III%20-%2014bit%20%283:2%29.DNG",
+      "sha256": "05513ee72f7cac4165534c9f64995412084f414a033c80c473c79fd94154292e",
+      "size_mb": 31.83,
+      "licence": "CC0-1.0",
+      "source": "https://raw.pixls.us/"
     }
   ]
 }

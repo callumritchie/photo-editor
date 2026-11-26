@@ -35,6 +35,7 @@ struct Params {
     lens2: vec4<f32>,     // red TCA v, c, b; vignetting radius per pixel
     lens3: vec4<f32>,     // blue TCA v, c, b; vignetting amount
     lens4: vec4<f32>,     // vignetting k1, k2, k3
+    warp: array<vec4<f32>, 6>, // DNG warp: kr R, G, B; kt R G; kt B, centre; m, on
 };
 
 // Per-pass parameters for the generic kernels.
@@ -889,6 +890,22 @@ fn geo_source(x: u32, y: u32, c: u32) -> vec2<f32> {
     let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
     let f = (1.0 + P.geo2.y * r2) * P.geo3[c];
     var e = vec2<f32>(dx * f, dy * f);
+    // The file's own lens correction (DNG WarpRectilinear, pe_raw::dng::WarpModel::source).
+    if (P.warp[5].y > 0.5) {
+        e *= P.lens1.z;
+        let ctr = P.warp[4].zw;
+        let m = P.warp[5].x;
+        let d = (vec2<f32>(sw * 0.5, sh * 0.5) + e - ctr) / m;
+        let r2 = dot(d, d);
+        let kr = P.warp[c];
+        var kt = P.warp[3].xy;
+        if (c == 1u) { kt = P.warp[3].zw; }
+        if (c == 2u) { kt = P.warp[4].xy; }
+        let f = kr.x + r2 * (kr.y + r2 * (kr.z + r2 * kr.w));
+        let t = vec2<f32>(kt.x * 2.0 * d.x * d.y + kt.y * (r2 + 2.0 * d.x * d.x),
+                          kt.y * 2.0 * d.x * d.y + kt.x * (r2 + 2.0 * d.y * d.y));
+        e = ctr + m * (d * f + t) - vec2<f32>(sw * 0.5, sh * 0.5);
+    }
     // Lens profile: zoom to fill, distortion, TCA.
     if (P.lens1.w > 0.5) {
         e *= P.lens1.z;

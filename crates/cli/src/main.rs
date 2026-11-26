@@ -455,6 +455,38 @@ fn info(input: &Path) -> Result<()> {
         println!("as-shot      {t:.0} K, tint {tint:+.0}");
     }
     println!("orientation  {}", f.orientation);
+    if let Some(l) = &f.lens {
+        println!(
+            "lens         {} ({} mm, f/{})",
+            l.name, l.focal_length, l.aperture
+        );
+    }
+    if f.rendered {
+        println!("rendered     yes (JPEG: display-referred)");
+    }
+    if let Some(x) = pe_raw::dng::read_extras_file(input).filter(|_| {
+        input
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("dng"))
+    }) {
+        println!(
+            "dng baseline {:+.2} EV (not applied: renders match native raws)",
+            x.baseline_exposure
+        );
+        for (i, l) in x.opcodes.iter().enumerate() {
+            for op in l {
+                let name = match op {
+                    pe_raw::dng::Opcode::WarpRectilinear(_) => "WarpRectilinear",
+                    pe_raw::dng::Opcode::FixVignetteRadial { .. } => "FixVignetteRadial",
+                    pe_raw::dng::Opcode::GainMap(_) => "GainMap",
+                };
+                println!("dng opcode   list {}: {name} (applied)", i + 1);
+            }
+        }
+        for id in &x.skipped {
+            println!("dng opcode   id {id}: not supported, skipped");
+        }
+    }
     Ok(())
 }
 

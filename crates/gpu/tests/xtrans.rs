@@ -43,6 +43,9 @@ fn gpu_xtrans_demosaic_matches_cpu() {
         scale: 1.0,
         lens: None,
         rendered: false,
+        exposure_bias: 0.0,
+        dng_warp: None,
+        own_lens_corrections: false,
     };
     let cpu = pe_pipeline::demosaic::high_quality(&data, w, h, &cfa);
     let g = gpu.demosaic(&frame).unwrap();

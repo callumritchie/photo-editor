@@ -3,6 +3,7 @@
 //! The rest of the codebase only sees `RawFrame`; the decoder backend (currently the
 //! LGPL-2.1 `rawler` crate) is an implementation detail behind [`decode_file`].
 
+pub mod dng;
 pub mod meta;
 
 use std::path::Path;
@@ -102,6 +103,12 @@ pub struct RawFrame {
     /// An already-rendered (display-referred) picture such as a JPEG, decoded to linear light.
     /// Rendering then skips the filmic display transform so untouched pictures look as they were.
     pub rendered: bool,
+    /// Stops added to the rendering (DNG BaselineExposure); 0 otherwise.
+    pub exposure_bias: f32,
+    /// A DNG's own lens distortion / chromatic aberration correction (WarpRectilinear).
+    pub dng_warp: Option<dng::WarpModel>,
+    /// The file carries its own lens corrections (DNG opcodes), so database profiles do not apply.
+    pub own_lens_corrections: bool,
 }
 
 /// The lens a photo was taken with.
@@ -130,6 +137,9 @@ impl RawFrame {
             scale: self.scale,
             lens: self.lens.clone(),
             rendered: self.rendered,
+            exposure_bias: self.exposure_bias,
+            dng_warp: self.dng_warp,
+            own_lens_corrections: self.own_lens_corrections,
         }
     }
 }
@@ -140,7 +150,16 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<RawFrame, RawError> {
         return decode_rendered(path.as_ref());
     }
     let img = rawler::decode_file(path.as_ref()).map_err(|e| RawError::Decoder(e.to_string()))?;
-    let mut frame = from_rawler(img)?;
+    let (mut frame, stage) = from_rawler_staged(img)?;
+    let is_dng = path
+        .as_ref()
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("dng"));
+    if is_dng {
+        if let Some(x) = dng::read_extras_file(path.as_ref()) {
+            apply_dng_extras(&mut frame, &x, stage);
+        }
+    }
     frame.lens = meta::raw_metadata(path.as_ref()).ok().and_then(|m| {
         Some(LensInfo {
             name: m.lens?,
@@ -149,6 +168,30 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<RawFrame, RawError> {
         })
     });
     Ok(frame)
+}
+
+/// Trim and collapse runs of spaces in a camera name (some DNGs pad them).
+fn tidy(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Apply what a DNG says beyond its pixels: gain opcodes to the samples and the warp as geometry.
+/// BaselineExposure is deliberately not applied: native raws get no such offset, so applying it would
+/// make a DNG render brighter or darker than the same camera's native raw (`exposure_bias` stays 0).
+pub fn apply_dng_extras(frame: &mut RawFrame, x: &dng::DngExtras, stage: dng::Stage) {
+    let cpp = if matches!(frame.layout, Layout::LinearRgb) {
+        3
+    } else {
+        1
+    };
+    dng::apply_gains(x, &mut frame.data, frame.width, frame.height, cpp, stage);
+    frame.dng_warp = dng::warp_model(x, frame.width, frame.height, stage);
+    frame.own_lens_corrections = x
+        .opcodes
+        .iter()
+        .flatten()
+        .any(|o| !matches!(o, dng::Opcode::GainMap(_)))
+        || frame.dng_warp.is_some();
 }
 
 /// The colour space an embedded ICC profile describes, recognised by its description (sRGB when
@@ -218,10 +261,14 @@ pub fn decode_rendered(path: &Path) -> Result<RawFrame, RawError> {
             aperture: m.f_number.unwrap_or(0.0) as f32,
         }),
         rendered: true,
+        exposure_bias: 0.0,
+        dng_warp: None,
+        own_lens_corrections: false,
     })
 }
 
-fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
+/// [`from_rawler`], also returning where the frame sits within the active area (the DNG stage image).
+fn from_rawler_staged(img: rawler::RawImage) -> Result<(RawFrame, dng::Stage), RawError> {
     use rawler::rawimage::RawPhotometricInterpretation as P;
 
     let (full_w, full_h, cpp) = (img.width, img.height, img.cpp);
@@ -232,6 +279,16 @@ fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
     let (cx, cy, cw, ch) = match rect {
         Some(r) => (r.p.x, r.p.y, r.d.w, r.d.h),
         None => (0, 0, full_w, full_h),
+    };
+    let (ax, ay, aw, ah) = match img.active_area {
+        Some(r) => (r.p.x, r.p.y, r.d.w, r.d.h),
+        None => (0, 0, full_w, full_h),
+    };
+    let stage = dng::Stage {
+        x0: cx.saturating_sub(ax),
+        y0: cy.saturating_sub(ay),
+        width: aw,
+        height: ah,
     };
     if cx + cw > full_w || cy + ch > full_h || cw == 0 || ch == 0 {
         return Err(RawError::Unsupported(format!(
@@ -316,20 +373,26 @@ fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
         return Err(RawError::Unsupported("camera has no colour matrix".into()));
     }
 
-    Ok(RawFrame {
-        make: img.clean_make,
-        model: img.clean_model,
-        width: cw,
-        height: ch,
-        layout,
-        data,
-        wb,
-        xyz_to_cam,
-        orientation: orientation_code(&img.orientation),
-        scale: 1.0,
-        lens: None,
-        rendered: false,
-    })
+    Ok((
+        RawFrame {
+            make: tidy(&img.clean_make),
+            model: tidy(&img.clean_model),
+            width: cw,
+            height: ch,
+            layout,
+            data,
+            wb,
+            xyz_to_cam,
+            orientation: orientation_code(&img.orientation),
+            scale: 1.0,
+            lens: None,
+            rendered: false,
+            exposure_bias: 0.0,
+            dng_warp: None,
+            own_lens_corrections: false,
+        },
+        stage,
+    ))
 }
 
 /// Pick the XYZ->camera matrix, preferring daylight-like calibration illuminants (closest to the

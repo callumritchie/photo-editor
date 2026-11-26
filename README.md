@@ -10,7 +10,8 @@ software vendor.
 **M0–M8 done.** There is a working Mac app (photo library, import, grid, an editing view with live GPU-rendered sliders, history, snapshots and presets, cached previews, and export), and the core decodes and renders raws.
 
 **Rendering (M2).** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
-and JPEGs (which are fully editable too: an untouched JPEG renders exactly as it was), and renders them:
+and JPEGs (which are fully editable too: an untouched JPEG renders exactly as it was), and renders them. DNGs get
+their built-in lens corrections (the distortion and shading corrections cameras such as Leica write into the file):
 
 black/white levels → edge-directed demosaic with false-colour suppression → white balance (as-shot, auto, or temperature/tint) with
 highlight reconstruction → wide-gamut (Rec.2020) scene-linear working space → exposure → local shadows/highlights → contrast →

@@ -66,6 +66,9 @@ struct Params {
     lens2: [f32; 4],
     lens3: [f32; 4],
     lens4: [f32; 4],
+    /// DNG warp (pe_raw::dng::WarpModel): kr0..kr3 for R, G, B; kt R, G; kt B and centre (pixels);
+    /// normalising distance (pixels), on.
+    warp: [[f32; 4]; 6],
 }
 
 /// Per-pass record for the generic kernels (matches `struct Pass` in the shader).
@@ -784,7 +787,7 @@ impl Gpu {
         };
         let to_work = pe_colour::camera_to_space(&f.header.xyz_to_cam, &REC2020_TO_XYZ_D65)
             .ok_or(GpuError::SingularMatrix)?;
-        let gain = s.exposure.exp2();
+        let gain = (s.exposure + f.header.exposure_bias).exp2();
         let out_m = ColorSpace::Srgb.from_space(&REC2020_TO_XYZ_D65);
         let tp =
             tone::ToneParams::new(s.contrast, s.whites, s.blacks).with_rendered(f.header.rendered);
@@ -963,8 +966,9 @@ impl Gpu {
                 geo.pdist[4],
                 geo.pr_scale,
                 geo.pfit,
-                (geo.pdist != [1.0, 0.0, 0.0, 0.0, 0.0] || geo.ptca != [[1.0, 0.0, 0.0]; 2]) as u32
-                    as f32,
+                (geo.dwarp.is_none()
+                    && (geo.pdist != [1.0, 0.0, 0.0, 0.0, 0.0] || geo.ptca != [[1.0, 0.0, 0.0]; 2]))
+                    as u32 as f32,
             ],
             lens2: [geo.ptca[0][0], geo.ptca[0][1], geo.ptca[0][2], geo.pv_scale],
             lens3: [
@@ -974,6 +978,22 @@ impl Gpu {
                 geo.pv_amount,
             ],
             lens4: [geo.pvig[0], geo.pvig[1], geo.pvig[2], 0.0],
+            warp: match &geo.dwarp {
+                Some(w) => {
+                    let k = &w.coeffs;
+                    let sw = geo.src_w as f32;
+                    let sh = geo.src_h as f32;
+                    [
+                        [k[0][0], k[0][1], k[0][2], k[0][3]],
+                        [k[1][0], k[1][1], k[1][2], k[1][3]],
+                        [k[2][0], k[2][1], k[2][2], k[2][3]],
+                        [k[0][4], k[0][5], k[1][4], k[1][5]],
+                        [k[2][4], k[2][5], w.centre[0] * sw, w.centre[1] * sh],
+                        [w.m_over_width * sw, 1.0, 0.0, 0.0],
+                    ]
+                }
+                None => [[0.0; 4]; 6],
+            },
         };
         self.queue
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));

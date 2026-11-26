@@ -242,7 +242,7 @@ fn scene_stage_in(
     } else if dp.nr || mp.needs_noise {
         // Measured without exposure (so exposure changes need no new measurement) and scaled:
         // noise of sqrt(g x) is sqrt(g) times that of sqrt(x).
-        let g = settings.exposure.exp2();
+        let g = (settings.exposure + frame.exposure_bias).exp2();
         let n = detail::noise_sigma(w, h, |x, y| {
             let i = (y * w + x) * 3;
             [data[i] / g, data[i + 1] / g, data[i + 2] / g]
@@ -692,7 +692,8 @@ pub fn render_scene_in(
     };
     let to_work: Mat3 = pe_colour::camera_to_space(&frame.xyz_to_cam, &REC2020_TO_XYZ_D65)
         .ok_or(RenderError::SingularMatrix)?;
-    let gain = settings.exposure.exp2();
+    // Exposure, plus the file's own baseline (DNG BaselineExposure).
+    let gain = (settings.exposure + frame.exposure_bias).exp2();
 
     let mut data = cam;
     let geo = geometry::GeometryParams::for_frame(settings, frame, ctx.full_w, ctx.full_h);
@@ -741,7 +742,7 @@ pub fn measure_globals(
     let scene = render_scene(frame, &s)?;
     let (w, h, data) = (scene.width, scene.height, scene.data);
     let airlight = local::airlight(&local::airlight_samples(&data, w, h));
-    let g = s.exposure.exp2();
+    let g = (s.exposure + frame.exposure_bias).exp2();
     let noise = detail::noise_sigma(w, h, |x, y| {
         let i = (y * w + x) * 3;
         [data[i] / g, data[i + 1] / g, data[i + 2] / g]
@@ -853,6 +854,9 @@ mod tests {
             scale: 1.0,
             lens: None,
             rendered: false,
+            exposure_bias: 0.0,
+            dng_warp: None,
+            own_lens_corrections: false,
         };
         let s = Settings::default();
         let draft = render_draft(&frame, &s).unwrap();

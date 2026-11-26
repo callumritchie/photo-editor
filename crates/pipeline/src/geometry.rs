@@ -61,6 +61,8 @@ pub struct GeometryParams {
     pub pvig: [f32; 3],
     pub pv_scale: f32,
     pub pv_amount: f32,
+    /// The file's own lens correction (DNG WarpRectilinear), used instead of a profile.
+    pub dwarp: Option<pe_raw::dng::WarpModel>,
 }
 
 const PDIST_IDENTITY: [f32; 5] = [1.0, 0.0, 0.0, 0.0, 0.0];
@@ -126,13 +128,20 @@ impl GeometryParams {
             pvig: [0.0; 3],
             pv_scale: 0.0,
             pv_amount: 0.0,
+            dwarp: None,
         }
     }
 
     /// [`new`](Self::new) for a photo, with its lens profile when the settings turn it on and the
     /// lens is in the database. `src_w` x `src_h` is the whole frame's size.
     pub fn for_frame(s: &Settings, frame: &pe_raw::RawFrame, src_w: usize, src_h: usize) -> Self {
-        let g = Self::new(s, src_w, src_h, frame.orientation);
+        let mut g = Self::new(s, src_w, src_h, frame.orientation);
+        if let Some(w) = frame.dng_warp {
+            g.dwarp = Some(w);
+            g.active = true;
+            g.pfit = g.fill_scale();
+            return g;
+        }
         match profile_for(s, frame) {
             Some(p) => g.with_profile(
                 &p,
@@ -181,6 +190,25 @@ impl GeometryParams {
         f * (t[0] + rd * (t[1] + rd * t[2]))
     }
 
+    /// The lens correction (DNG warp, or the profile's distortion and TCA) for a sensor offset from
+    /// the centre: the offset sampled instead.
+    #[inline]
+    fn lens_map(&self, ex: f32, ey: f32, c: usize) -> (f32, f32) {
+        if let Some(w) = &self.dwarp {
+            let (sw, sh) = (self.src_w as f32, self.src_h as f32);
+            let (x, y) = w.source(sw * 0.5 + ex, sh * 0.5 + ey, c, sw, sh);
+            return (x - sw * 0.5, y - sh * 0.5);
+        }
+        let g = self.profile_factor(ex, ey, c);
+        (ex * g, ey * g)
+    }
+
+    /// Whether a lens correction (DNG warp or profile geometry) is applied.
+    #[inline]
+    fn has_lens_geometry(&self) -> bool {
+        self.dwarp.is_some() || self.pdist != PDIST_IDENTITY || self.ptca != PTCA_IDENTITY
+    }
+
     /// Largest zoom-out (between 0.5 and 1.5) for which the corrected frame's border still samples
     /// inside the photo.
     fn fill_scale(&self) -> f32 {
@@ -193,9 +221,8 @@ impl GeometryParams {
             .collect();
         let fits = |s: f32| {
             border.iter().all(|&(x, y)| {
-                let (x, y) = (x * s, y * s);
-                let f = self.profile_factor(x, y, 1);
-                (x * f).abs() <= hw * 1.0005 && (y * f).abs() <= hh * 1.0005
+                let (mx, my) = self.lens_map(x * s, y * s, 1);
+                mx.abs() <= hw * 1.0005 && my.abs() <= hh * 1.0005
             })
         };
         let (mut lo, mut hi) = (0.5f32, 1.5f32);
@@ -266,13 +293,9 @@ impl GeometryParams {
         let r2 = (dx * dx + dy * dy) / (sw * sw * 0.25 + sh * sh * 0.25);
         let f = (1.0 + self.k1 * r2) * self.ca[c];
         let (mut ex, mut ey) = (dx * f, dy * f);
-        // 7. lens profile: zoom to fill, distortion, TCA (corrected -> photo radius).
-        if self.pdist != PDIST_IDENTITY || self.ptca != PTCA_IDENTITY {
-            ex *= self.pfit;
-            ey *= self.pfit;
-            let g = self.profile_factor(ex, ey, c);
-            ex *= g;
-            ey *= g;
+        // 7. lens correction (the file's own warp, or the profile): zoom to fill, then map.
+        if self.has_lens_geometry() {
+            (ex, ey) = self.lens_map(ex * self.pfit, ey * self.pfit, c);
         }
         (sw * 0.5 + ex, sh * 0.5 + ey)
     }
@@ -430,7 +453,7 @@ pub fn profile_for(s: &Settings, frame: &pe_raw::RawFrame) -> Option<pe_lens::Pr
 
 /// The database match for a photo's lens (when profiles are on).
 pub fn lens_match(s: &Settings, frame: &pe_raw::RawFrame) -> Option<pe_lens::Match> {
-    if s.lens.profile != crate::settings::ProfileMode::On {
+    if s.lens.profile != crate::settings::ProfileMode::On || frame.own_lens_corrections {
         return None;
     }
     let l = frame.lens.as_ref()?;
