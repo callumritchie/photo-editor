@@ -7,7 +7,7 @@ software vendor.
 
 ## Status
 
-**M0–M6 done.** There is a working Mac app (photo library, import, grid, an editing view with live GPU-rendered sliders, history, snapshots and presets, cached previews, and export), and the core decodes and renders raws.
+**M0–M7 done.** There is a working Mac app (photo library, import, grid, an editing view with live GPU-rendered sliders, history, snapshots and presets, cached previews, and export), and the core decodes and renders raws.
 
 **Rendering (M2).** The core decodes raw files from all major camera makes (Bayer and X-Trans sensors, and DNG)
 and renders them on the CPU:
@@ -57,6 +57,12 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
   selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.
   `Esc` returns to the grid.
+- **Organise:** collections and collection sets (drag photos onto a collection, or right-click › Add to Collection);
+  smart collections built from rules (rating, flag, label, keywords, camera, lens, exposure, dates, file type, edited,
+  …), which always stay up to date; hierarchical keywords (⌘K; type `Animals > Birds` for levels) shown in the
+  sidebar with counts; search (names, keywords, cameras, lenses) plus flag, label and rating filters; sorting;
+  virtual copies (⌘') with their own edits; stacks (⌘G to group, ⇧⌘G to remove, click the badge to expand);
+  Remove from Library (⌘⌫, never deletes files).
 - **Previews:** the loupe opens on a cached 2048 px preview straight away, then switches to the live render. While you view a
   photo, the ones either side are rendered in the background; *File › Build Previews* renders the selection (or all shown).
   Edited grid thumbnails are re-rendered in the background too. Cached previews live in `previews.sqlite` inside the library
@@ -69,6 +75,8 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
 
 Command-line equivalents: `pe new`, `pe import [--copy-to DIR --template "%Y/%Y-%m-%d"]`, `pe ls`, `pe folders`, `pe thumb`,
 `pe develop LIB ID --command '{"command":"set","settings":{"exposure":0.5}}'` (also `undo`, `redo`, `reset`, `applyPreset`, …),
+`pe library LIB --command '{"command":"addKeywords","imageIds":[1],"paths":["Trips > Paris"]}'` (also collections,
+smart collections, virtual copies, stacks), `pe ls LIB --query '{"text":"paris","collapseStacks":true}'`,
 `pe export LIB [IDS…] --to DIR [--format jpeg|png|tiff|original --space srgb|p3|adobe|prophoto --long-edge 2048 --name "{date}_{seq:3}"]`
 (or `--settings FILE` with JSON from `pe export-settings`).
 

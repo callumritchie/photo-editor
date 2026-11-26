@@ -943,6 +943,55 @@ mod tests {
     }
 
     #[test]
+    fn library_commands_and_query_fields() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("p");
+        std::fs::create_dir_all(&src).unwrap();
+        for n in ["a.jpg", "b.jpg"] {
+            image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]))
+                .save(src.join(n))
+                .unwrap();
+        }
+        unsafe {
+            let path = CString::new(t.path().join("lib.pecat").to_str().unwrap()).unwrap();
+            let h = pe_catalog_open(path.as_ptr(), true, ptr::null_mut());
+            let sources = CString::new(serde_json::to_string(&[&src]).unwrap()).unwrap();
+            take(pe_catalog_import_json(
+                h,
+                sources.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+            ));
+            let run = |cmd: serde_json::Value| -> serde_json::Value {
+                let c = CString::new(cmd.to_string()).unwrap();
+                serde_json::from_str(&take(pe_catalog_library_json(h, c.as_ptr()))).unwrap()
+            };
+            let r = run(
+                serde_json::json!({"command": "addKeywords", "imageIds": [1, 2], "paths": ["Trip > Day 1"]}),
+            );
+            assert_eq!(r["ok"], true);
+            let kw = run(serde_json::json!({"command": "keywords"}));
+            assert_eq!(kw[1]["path"], "Trip > Day 1");
+            let r = run(serde_json::json!({"command": "stack", "imageIds": [2, 1]}));
+            assert!(r["id"].as_i64().is_some());
+            let bad = run(
+                serde_json::json!({"command": "createCollection", "name": " ", "kind": "collection"}),
+            );
+            assert!(bad["error"].is_string());
+            let q = CString::new(r#"{"collapseStacks": true, "text": "day"}"#).unwrap();
+            let rows: serde_json::Value =
+                serde_json::from_str(&take(pe_catalog_images_json(h, q.as_ptr()))).unwrap();
+            assert_eq!(rows.as_array().unwrap().len(), 1);
+            assert_eq!(
+                (rows[0]["id"].as_i64(), rows[0]["stackSize"].as_i64()),
+                (Some(2), Some(2))
+            );
+            pe_catalog_close(h);
+        }
+    }
+
+    #[test]
     fn export_and_export_presets() {
         let t = tempfile::tempdir().unwrap();
         let src = t.path().join("p");

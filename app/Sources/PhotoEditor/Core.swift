@@ -22,6 +22,15 @@ struct ImageItem: Codable, Identifiable, Hashable {
     let exposureTime: Double?
     let fNumber: Double?
     let focalLength: Double?
+    var copyName: String?
+    var masterId: Int64?
+    var stackId: Int64?
+    var stackPosition: Int64?
+    var stackSize: Int64 = 0
+    var stackCollapsed = false
+
+    /// File name, plus the copy name for virtual copies.
+    var displayName: String { copyName.map { "\(name) (\($0))" } ?? name }
 
     var exposureSummary: String {
         var parts: [String] = []
@@ -61,6 +70,12 @@ struct Query: Codable {
     var minRating: Int = 0
     var flag: Int? = nil
     var label: String? = nil
+    var collectionId: Int64? = nil
+    var keywordId: Int64? = nil
+    var text: String? = nil
+    var collapseStacks = true
+    var sort = "captureTime"
+    var descending = false
 }
 
 enum CoreError: LocalizedError {

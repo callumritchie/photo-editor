@@ -23,9 +23,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static func snapshot(to url: URL) {
         let main = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && $0.sheetParent == nil })
-        guard let view = (main?.attachedSheet ?? main)?.contentView,
-              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
-        view.cacheDisplay(in: view.bounds, to: rep)
+        // Render the whole window's layer tree (includes toolbar, inspector and other layer-backed
+        // content that cacheDisplay can miss); fall back to cacheDisplay.
+        guard let window = main?.attachedSheet ?? main, let content = window.contentView else { return }
+        let view = content.superview ?? content
+        let scale = window.backingScaleFactor
+        let size = view.bounds.size
+        if let layer = view.layer,
+           let ctx = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
+                               bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                               bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) {
+            ctx.scaleBy(x: scale, y: scale)
+            if !view.isFlipped {} else { ctx.translateBy(x: 0, y: size.height); ctx.scaleBy(x: 1, y: -1) }
+            layer.render(in: ctx)
+            if let cg = ctx.makeImage() {
+                try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)
+                return
+            }
+        }
+        guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return }
+        content.cacheDisplay(in: content.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: url)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -62,6 +79,22 @@ struct PhotoEditorApp: App {
                 Button("Paste Settings") { state.pasteSettings() }
                     .keyboardShortcut("v", modifiers: [.command, .shift])
                     .disabled(state.copiedSettings == nil)
+                Divider()
+                Button("Keywords…") { state.showKeywords.toggle() }
+                    .keyboardShortcut("k", modifiers: .command)
+                Button("Create Virtual Copy") { state.createVirtualCopies(state.exportTargets) }
+                    .keyboardShortcut("'", modifiers: .command)
+                    .disabled(state.exportTargets.isEmpty)
+                Button("Group into Stack") { state.stack(state.exportTargets) }
+                    .keyboardShortcut("g", modifiers: .command)
+                    .disabled(state.exportTargets.count < 2)
+                Button("Remove from Stack") { state.unstack(state.exportTargets) }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .disabled(state.exportTargets.isEmpty)
+                Divider()
+                Button("Remove from Library…") { state.confirmRemove = state.exportTargets }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(state.exportTargets.isEmpty)
             }
         }
     }
@@ -90,7 +123,37 @@ struct ContentView: View {
                         ForEach(1...5, id: \.self) { Text(String(repeating: "★", count: $0) + "+").tag($0) }
                     }
                     .frame(width: 110)
+                    Menu {
+                        Picker("Flag", selection: $state.flagFilter) {
+                            Text("Any flag").tag(Int?.none)
+                            Text("Picked").tag(Int?.some(1))
+                            Text("Unflagged").tag(Int?.some(0))
+                            Text("Rejected").tag(Int?.some(-1))
+                        }
+                        Picker("Colour label", selection: $state.labelFilter) {
+                            Text("Any label").tag(String?.none)
+                            ForEach(["red", "yellow", "green", "blue", "purple"], id: \.self) { Text($0.capitalized).tag(String?.some($0)) }
+                        }
+                        Divider()
+                        Button("Clear Filters") { state.flagFilter = nil; state.labelFilter = nil; state.minRating = 0; state.searchText = "" }
+                    } label: {
+                        Label("Filter", systemImage: state.flagFilter != nil || state.labelFilter != nil
+                              ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                    }
+                    Menu {
+                        Picker("Sort by", selection: $state.sort) {
+                            Text("Capture Time").tag("captureTime")
+                            Text("File Name").tag("fileName")
+                            Text("Rating").tag("rating")
+                            Text("Import Order").tag("imported")
+                        }
+                        Toggle("Descending", isOn: $state.descending)
+                        Divider()
+                        Toggle("Collapse Stacks", isOn: $state.collapseStacks)
+                    } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
                     Slider(value: $state.thumbSize, in: 100...360).frame(width: 120)
+                    Button { state.showKeywords.toggle() } label: { Label("Keywords", systemImage: "tag") }
+                        .help("Keywords of the selected photos (⌘K)")
                     Button { state.showImport = true } label: { Label("Import", systemImage: "square.and.arrow.down") }
                     Button { state.showExport = true } label: { Label("Export", systemImage: "square.and.arrow.up") }
                         .disabled(state.exportTargets.isEmpty)
@@ -99,6 +162,26 @@ struct ContentView: View {
         }
         .onChange(of: state.sidebar) { state.reload() }
         .onChange(of: state.minRating) { state.reload() }
+        .onChange(of: state.searchText) { state.reload() }
+        .onChange(of: state.sort) { state.reload() }
+        .onChange(of: state.descending) { state.reload() }
+        .onChange(of: state.collapseStacks) { state.reload() }
+        .onChange(of: state.flagFilter) { state.reload() }
+        .onChange(of: state.labelFilter) { state.reload() }
+        .searchable(text: $state.searchText, placement: .toolbar, prompt: "Search names, keywords, cameras")
+        .inspector(isPresented: $state.showKeywords) { KeywordPanel().inspectorColumnWidth(min: 240, ideal: 280, max: 400) }
+        .sheet(item: $state.collectionSheet) { CollectionSheetView(sheet: $0) }
+        .sheet(item: $state.keywordRename) { k in RenameKeywordSheet(keyword: k) }
+        .alert("Remove from Library?", isPresented: Binding(get: { state.confirmRemove != nil },
+                                                           set: { if !$0 { state.confirmRemove = nil } })) {
+            Button("Remove", role: .destructive) {
+                if let ids = state.confirmRemove { state.removeFromLibrary(ids) }
+                state.confirmRemove = nil
+            }
+            Button("Cancel", role: .cancel) { state.confirmRemove = nil }
+        } message: {
+            Text("\(state.confirmRemove?.count ?? 0) photo(s) will be removed from the library with their edits. The files on disk are not touched. Removing an original also removes its virtual copies.")
+        }
         .sheet(isPresented: $state.showImport) { ImportSheet() }
         .sheet(isPresented: $state.showExport) { ExportSheet() }
         .overlay(alignment: .bottom) { StatusBar() }
@@ -117,6 +200,8 @@ struct SidebarView: View {
             Section("Library") {
                 Label("All Photographs", systemImage: "photo.on.rectangle").tag(SidebarItem.all)
             }
+            CollectionsSection()
+            KeywordsSection()
             Section("Folders") {
                 ForEach(state.folders) { f in
                     HStack {
@@ -266,7 +351,10 @@ struct ThumbCell: View {
         }
         .padding(4)
         .background(RoundedRectangle(cornerRadius: 8).fill(selected ? Color.accentColor.opacity(0.35) : .clear))
-        .help("\(item.name)\n\(item.camera ?? "")  \(item.exposureSummary)")
+        .overlay(alignment: .topTrailing) { ThumbBadges(item: item) }
+        .contextMenu { PhotoContextMenu(item: item) }
+        .draggable(String(item.id))
+        .help("\(item.displayName)\n\(item.camera ?? "")  \(item.exposureSummary)")
         .task(id: "\(item.id)-\(state.thumbVersion[item.id, default: 0])") { image = await state.thumbnail(item.id) }
     }
 }
@@ -328,7 +416,7 @@ struct LoupeImage: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack(spacing: 12) {
-                Text(item.name).bold().lineLimit(1)
+                Text(item.displayName).bold().lineLimit(1)
                 Text([item.camera ?? "", item.exposureSummary].filter { !$0.isEmpty }.joined(separator: "  ·  "))
                     .lineLimit(1).truncationMode(.tail).foregroundStyle(.white.opacity(0.85))
                 Spacer(minLength: 8)
@@ -439,5 +527,28 @@ struct ImportSheet: View {
         panel.canChooseFiles = !directories
         panel.allowsMultipleSelection = multiple
         return panel.runModal() == .OK ? panel.urls : []
+    }
+}
+
+struct RenameKeywordSheet: View {
+    @EnvironmentObject var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    let keyword: KeywordItem
+    @State private var name = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rename Keyword").font(.headline)
+            TextField("Name", text: $name).frame(width: 280)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Rename") { state.renameKeyword(keyword.id, to: name); dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .onAppear { name = keyword.name }
     }
 }

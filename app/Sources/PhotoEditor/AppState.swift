@@ -4,6 +4,8 @@ import SwiftUI
 enum SidebarItem: Hashable {
     case all
     case folder(Int64)
+    case collection(Int64)
+    case keyword(Int64)
 }
 
 enum ViewMode { case grid, loupe }
@@ -18,6 +20,19 @@ final class AppState: ObservableObject {
     @Published var images: [ImageItem] = []
     @Published var sidebar: SidebarItem? = .all
     @Published var minRating = 0
+    @Published var searchText = ""
+    @Published var flagFilter: Int?
+    @Published var labelFilter: String?
+    @Published var sort = "captureTime"
+    @Published var descending = false
+    @Published var collapseStacks = true
+    @Published var collections: [CollectionItem] = []
+    @Published var keywords: [KeywordItem] = []
+    @Published var selectionKeywords: [KeywordItem] = []
+    @Published var showKeywords = false
+    @Published var collectionSheet: CollectionSheet?
+    @Published var keywordRename: KeywordItem?
+    @Published var confirmRemove: [Int64]?
     @Published var selection: Set<Int64> = []
     @Published var focused: Int64?
     @Published var mode: ViewMode = .grid
@@ -59,6 +74,11 @@ final class AppState: ObservableObject {
         let envs = ProcessInfo.processInfo.environment
         if let i = Int(envs["PE_START_INDEX"] ?? ""), images.indices.contains(i) { select(images[i].id) }
         mode = envs["PE_START_MODE"] == "loupe" ? .loupe : .grid
+        showKeywords = envs["PE_SHOW_KEYWORDS"] != nil
+        // PE_EDIT_COLLECTION=<id>: open a smart collection's rule editor (UI snapshots).
+        if let cid = Int64(envs["PE_EDIT_COLLECTION"] ?? ""), let c = collections.first(where: { $0.id == cid }) {
+            collectionSheet = .edit(c)
+        }
         exportPresets = (try? core?.exportPresets()) ?? []
         core?.onRendered { [weak self] id, thumbChanged in
             Task { @MainActor in self?.rendered(id, thumbChanged: thumbChanged) }
@@ -71,9 +91,23 @@ final class AppState: ObservableObject {
     func reload() {
         guard let core else { return }
         var q = Query(minRating: minRating)
-        if case .folder(let id) = sidebar { q.folderId = id; q.recursive = true }
+        switch sidebar {
+        case .folder(let id): q.folderId = id; q.recursive = true
+        case .collection(let id): q.collectionId = id
+        case .keyword(let id): q.keywordId = id
+        default: break
+        }
+        let text = searchText.trimmingCharacters(in: .whitespaces)
+        q.text = text.isEmpty ? nil : text
+        q.sort = sort
+        q.descending = descending
+        q.collapseStacks = collapseStacks
+        q.flag = flagFilter
+        q.label = labelFilter
         do {
             folders = try core.folders()
+            collections = (try? core.library(["command": "collections"])) ?? []
+            keywords = (try? core.library(["command": "keywords"])) ?? []
             images = try core.images(q)
             presets = (try? core.presets()) ?? []
             selection = selection.filter { id in images.contains { $0.id == id } }
@@ -338,5 +372,124 @@ final class AppState: ObservableObject {
     func deleteExportPreset(_ id: Int64) {
         core?.deleteExportPreset(id)
         exportPresets = (try? core?.exportPresets()) ?? []
+    }
+
+    // MARK: library organisation
+
+    /// The photos an action applies to when invoked on `id`: the selection if `id` is in it, else `id`.
+    func targets(including id: Int64) -> [Int64] {
+        selection.contains(id) ? exportTargets : [id]
+    }
+
+    private func library(_ command: [String: Any]) {
+        guard let core else { return }
+        do { try core.libraryRun(command) } catch { errorMessage = error.localizedDescription }
+        reload()
+    }
+
+    func addToCollection(_ id: Int64, ids: [Int64]) {
+        library(["command": "addToCollection", "id": id, "imageIds": ids])
+    }
+
+    func removeFromCollection(_ id: Int64, ids: [Int64]) {
+        library(["command": "removeFromCollection", "id": id, "imageIds": ids])
+    }
+
+    func moveCollection(_ id: Int64, to parent: Int64?) {
+        var cmd: [String: Any] = ["command": "moveCollection", "id": id]
+        if let parent { cmd["parentId"] = parent }
+        library(cmd)
+    }
+
+    func deleteCollection(_ id: Int64) {
+        if sidebar == .collection(id) { sidebar = .all }
+        library(["command": "deleteCollection", "id": id])
+    }
+
+    /// Create, rename or edit a collection from its sheet. Returns false (with an error shown) on failure.
+    func saveCollection(_ sheet: CollectionSheet, name: String, rules: RuleSetModel?, addSelection: Bool) -> Bool {
+        guard let core else { return false }
+        do {
+            switch sheet {
+            case .create(let kind, let parent):
+                var cmd: [String: Any] = ["command": "createCollection", "name": name, "kind": kind]
+                if let parent { cmd["parentId"] = parent }
+                if let rules { cmd["rules"] = rules.jsonObject }
+                struct Created: Decodable { let id: Int64 }
+                let created: Created = try core.library(cmd)
+                if kind == "collection", addSelection, !exportTargets.isEmpty {
+                    try core.libraryRun(["command": "addToCollection", "id": created.id, "imageIds": exportTargets])
+                }
+                if kind != "set" { sidebar = .collection(created.id) }
+            case .edit(let c):
+                try core.libraryRun(["command": "setSmartRules", "id": c.id, "rules": (rules ?? RuleSetModel()).jsonObject])
+            case .rename(let c):
+                try core.libraryRun(["command": "renameCollection", "id": c.id, "name": name])
+            }
+            reload()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func refreshSelectionKeywords() {
+        guard let core else { return }
+        selectionKeywords = (try? core.library(["command": "keywordsOf", "imageIds": exportTargets])) ?? []
+    }
+
+    /// Add comma-separated keyword paths ("Animals > Birds, Night") to the selected photos.
+    func addKeywords(_ text: String) {
+        let paths = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !paths.isEmpty, !exportTargets.isEmpty else { return }
+        library(["command": "addKeywords", "imageIds": exportTargets, "paths": paths])
+        refreshSelectionKeywords()
+    }
+
+    func removeKeyword(_ id: Int64) {
+        library(["command": "removeKeyword", "imageIds": exportTargets, "keywordId": id])
+        refreshSelectionKeywords()
+    }
+
+    func renameKeyword(_ id: Int64, to name: String) {
+        library(["command": "renameKeyword", "id": id, "name": name])
+    }
+
+    func deleteKeyword(_ id: Int64) {
+        if sidebar == .keyword(id) { sidebar = .all }
+        library(["command": "deleteKeyword", "id": id])
+    }
+
+    func createVirtualCopies(_ ids: [Int64]) {
+        guard let core else { return }
+        var last: Int64?
+        for id in ids {
+            struct Created: Decodable { let id: Int64 }
+            do { last = (try core.library(["command": "createVirtualCopy", "imageId": id]) as Created).id }
+            catch { errorMessage = error.localizedDescription }
+        }
+        reload()
+        if let last { select(last) }
+    }
+
+    func stack(_ ids: [Int64]) {
+        // The focused photo goes on top.
+        let ordered = ids.sorted { a, b in a == focused && b != focused }
+        library(["command": "stack", "imageIds": ordered])
+    }
+
+    func unstack(_ ids: [Int64]) { library(["command": "unstack", "imageIds": ids]) }
+
+    func setStackTop(_ id: Int64) { library(["command": "setStackTop", "imageId": id]) }
+
+    func toggleStack(_ item: ImageItem) {
+        guard let s = item.stackId else { return }
+        library(["command": "setStackCollapsed", "stackId": s, "collapsed": !item.stackCollapsed])
+    }
+
+    func removeFromLibrary(_ ids: [Int64]) {
+        library(["command": "removeImages", "imageIds": ids])
+        for id in ids { thumbCache.removeObject(forKey: NSNumber(value: id)) }
     }
 }
