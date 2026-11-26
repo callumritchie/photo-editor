@@ -1,6 +1,8 @@
-// GPU version of the develop pipeline for linear-RGB (already demosaiced or superpixel) frames.
-// Each entry point mirrors a function of the CPU reference in pe-pipeline; see the comments there for
-// the reasoning behind each stage. Parity is checked by tests (ΔE2000 against the CPU path).
+// GPU version of the develop pipeline for linear-RGB (already demosaiced or reduced) frames. Every
+// entry point mirrors a function of the CPU reference in pe-pipeline; tests check parity (CIEDE2000).
+//
+// Intermediate images live in one pool of vec4 planes. Generic kernels (downscale, min filter, box
+// blur, guided-filter coefficients) read and write planes chosen by a per-pass uniform `Q`.
 
 struct Params {
     wb: vec4<f32>,        // xyz: camera white-balance multipliers; w: exposure gain
@@ -12,22 +14,34 @@ struct Params {
     o2: vec4<f32>,
     out_luma: vec4<f32>,  // output-space luminance weights
     tone: vec4<f32>,      // contrast power, white norm, black level, log2(mid grey)
-    local: vec4<f32>,     // shadow EV, highlight EV, eps, enabled
+    local: vec4<f32>,     // shadow EV, highlight EV, clarity gain, texture gain
     dims: vec4<u32>,      // source width, height; reduced width, height
-    dims2: vec4<u32>,     // reduction factor, blur radius (reduced px), orientation, has curve
-    dims3: vec4<u32>,     // output width, height, output encoding (0 = sRGB, 1 = linear float), unused
+    dims2: vec4<u32>,     // reduction factor, unused, orientation, has curve
+    dims3: vec4<u32>,     // output width, height, unused, unused
+    haze: vec4<f32>,      // airlight rgb, airlight luminance
+    haze2: vec4<f32>,     // omega (dehaze) , beta (add haze), unused, unused
+    offs: vec4<u32>,      // pool offsets: scene, shadows/highlights coeffs, clarity coeffs, texture blur
+    flags: vec4<u32>,     // shadows/highlights, clarity, texture, dehaze coefficients offset
+};
+
+// Per-pass parameters for the generic kernels.
+struct Pass {
+    src: u32,
+    dst: u32,
+    w: u32,               // destination (or source for blurs) width, height
+    h: u32,
+    sw: u32,              // source width, height (downscale)
+    sh: u32,
+    r: u32,               // radius
+    mode: u32,
+    k: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> src: array<f32>;
-@group(0) @binding(2) var<storage, read_write> scene: array<f32>;
-@group(0) @binding(3) var<storage, read_write> logy: array<f32>;
-@group(0) @binding(4) var<storage, read_write> small: array<f32>;
-@group(0) @binding(5) var<storage, read_write> tmp: array<vec2<f32>>;
-@group(0) @binding(6) var<storage, read_write> stats: array<vec2<f32>>;
-@group(0) @binding(7) var<storage, read_write> ab: array<vec2<f32>>;
-@group(0) @binding(8) var<storage, read> lut: array<f32>;
-@group(0) @binding(9) var<storage, read_write> out_rgba: array<u32>;
+@group(0) @binding(2) var<storage, read_write> pool: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> lut: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out_rgba: array<u32>;
 
 // Colour stage constants (pe_pipeline::look::LookParams).
 struct Look {
@@ -42,7 +56,8 @@ struct Look {
     grade: array<vec4<f32>, 4>,        // (a, b, lightness) for shadows, midtones, highlights, global
     shape: vec4<f32>,                  // transition half-width, balance
 };
-@group(0) @binding(10) var<uniform> L: Look;
+@group(0) @binding(5) var<uniform> L: Look;
+@group(0) @binding(6) var<uniform> Q: Pass;
 
 const CLIP: f32 = 0.985;
 const MID_GREY: f32 = 0.18;
@@ -86,6 +101,11 @@ fn reconstruct(cam: vec3<f32>) -> vec3<f32> {
     return c;
 }
 
+
+fn luma(c: vec3<f32>) -> f32 { return dot(c, REC2020_LUMA); }
+
+// --- Stage 2-3 -> pool[scene] = (Rec.2020 rgb, log2 Y) ---------------------------------------------
+
 @compute @workgroup_size(256)
 fn scene_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = index(gid, nwg);
@@ -93,102 +113,105 @@ fn scene_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let cam = vec3<f32>(src[3u * i], src[3u * i + 1u], src[3u * i + 2u]);
     let b = reconstruct(cam);
     let w = vec3<f32>(dot(P.m0.xyz, b), dot(P.m1.xyz, b), dot(P.m2.xyz, b)) * P.wb.w;
-    scene[3u * i] = w.x;
-    scene[3u * i + 1u] = w.y;
-    scene[3u * i + 2u] = w.z;
-    logy[i] = log2(max(dot(w, REC2020_LUMA), 1.0e-6));
+    pool[P.offs.x + i] = vec4<f32>(w, log2(max(luma(w), 1.0e-6)));
 }
 
-// --- Stage 4: fast guided filter on log luminance (shadows / highlights) ------------------------
+// --- Generic plane kernels (local.rs, filter.rs) -----------------------------------------------------
 
+// Block-average downscale of the scene plane. mode 0: (dark channel / airlight, guide, 0, 0) for
+// dehaze; mode 1: (log Y, log Y, log Y^2, log Y^2) for a self-guided filter.
 @compute @workgroup_size(256)
-fn downscale_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn downscale(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = index(gid, nwg);
-    let sw = P.dims.z;
-    if (i >= sw * P.dims.w) { return; }
+    if (i >= Q.w * Q.h) { return; }
     let f = P.dims2.x;
-    let x2 = i % sw;
-    let y2 = i / sw;
-    var s = 0.0;
+    let x2 = i % Q.w;
+    let y2 = i / Q.w;
+    var s = vec4<f32>(0.0);
     var n = 0.0;
-    for (var y = y2 * f; y < min((y2 + 1u) * f, P.dims.y); y++) {
-        for (var x = x2 * f; x < min((x2 + 1u) * f, P.dims.x); x++) {
-            s += logy[y * P.dims.x + x];
+    for (var y = y2 * f; y < min((y2 + 1u) * f, Q.sh); y++) {
+        for (var x = x2 * f; x < min((x2 + 1u) * f, Q.sw); x++) {
+            s += pool[Q.src + y * Q.sw + x];
             n += 1.0;
         }
     }
-    small[i] = s / max(n, 1.0);
-}
-
-// Horizontal box mean of (I, I^2) with a clamped, count-normalised window.
-@compute @workgroup_size(256)
-fn blur_h_moments(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
-    let i = index(gid, nwg);
-    let sw = P.dims.z;
-    if (i >= sw * P.dims.w) { return; }
-    let r = i32(P.dims2.y);
-    let x = i32(i % sw);
-    let row = i - u32(x);
-    let a = max(x - r, 0);
-    let b = min(x + r + 1, i32(sw));
-    var acc = vec2<f32>(0.0);
-    for (var k = a; k < b; k++) {
-        let v = small[row + u32(k)];
-        acc += vec2<f32>(v, v * v);
+    let m = s / max(n, 1.0);
+    if (Q.mode == 0u) {
+        let a = P.haze.xyz;
+        let dark = min(m.x / a.x, min(m.y / a.y, m.z / a.z));
+        pool[Q.dst + i] = vec4<f32>(dark, clamp(luma(m.xyz) / P.haze.w, 0.0, 2.0), 0.0, 0.0);
+    } else {
+        pool[Q.dst + i] = vec4<f32>(m.w, m.w, m.w * m.w, m.w * m.w);
     }
-    tmp[i] = acc / f32(b - a);
 }
 
-// Horizontal box mean of the coefficients (a, b).
+// Clamped-window minimum of .x (other channels kept). mode 0 horizontal, 1 vertical.
 @compute @workgroup_size(256)
-fn blur_h_coeffs(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn min_filter(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = index(gid, nwg);
-    let sw = P.dims.z;
-    if (i >= sw * P.dims.w) { return; }
-    let r = i32(P.dims2.y);
-    let x = i32(i % sw);
-    let row = i - u32(x);
-    let a = max(x - r, 0);
-    let b = min(x + r + 1, i32(sw));
-    var acc = vec2<f32>(0.0);
-    for (var k = a; k < b; k++) {
-        acc += ab[row + u32(k)];
+    if (i >= Q.w * Q.h) { return; }
+    let r = i32(Q.r);
+    let x = i32(i % Q.w);
+    let y = i32(i / Q.w);
+    var m = 1.0e30;
+    if (Q.mode == 0u) {
+        for (var k = max(x - r, 0); k < min(x + r + 1, i32(Q.w)); k++) { m = min(m, pool[Q.src + u32(y) * Q.w + u32(k)].x); }
+    } else {
+        for (var k = max(y - r, 0); k < min(y + r + 1, i32(Q.h)); k++) { m = min(m, pool[Q.src + u32(k) * Q.w + u32(x)].x); }
     }
-    tmp[i] = acc / f32(b - a);
+    var v = pool[Q.src + i];
+    v.x = m;
+    pool[Q.dst + i] = v;
 }
 
-// Vertical box mean: tmp -> stats.
+// Dehaze guided-filter input: (dark, guide) -> (I, p, I p, I I) with I = guide, p = 1 - omega dark.
 @compute @workgroup_size(256)
-fn blur_v(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn dehaze_input(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = index(gid, nwg);
-    let sw = P.dims.z;
-    let sh = P.dims.w;
-    if (i >= sw * sh) { return; }
-    let r = i32(P.dims2.y);
-    let x = i % sw;
-    let y = i32(i / sw);
-    let a = max(y - r, 0);
-    let b = min(y + r + 1, i32(sh));
-    var acc = vec2<f32>(0.0);
-    for (var k = a; k < b; k++) {
-        acc += tmp[u32(k) * sw + x];
+    if (i >= Q.w * Q.h) { return; }
+    let v = pool[Q.src + i];
+    let g = v.y;
+    let p = 1.0 - P.haze2.x * v.x;
+    pool[Q.dst + i] = vec4<f32>(g, p, g * p, g * g);
+}
+
+// Clamped, count-normalised box mean of all four channels. mode 0 horizontal, 1 vertical.
+@compute @workgroup_size(256)
+fn box(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    let r = i32(Q.r);
+    let x = i32(i % Q.w);
+    let y = i32(i / Q.w);
+    var acc = vec4<f32>(0.0);
+    var a = 0;
+    var b = 0;
+    if (Q.mode == 0u) {
+        a = max(x - r, 0);
+        b = min(x + r + 1, i32(Q.w));
+        for (var k = a; k < b; k++) { acc += pool[Q.src + u32(y) * Q.w + u32(k)]; }
+    } else {
+        a = max(y - r, 0);
+        b = min(y + r + 1, i32(Q.h));
+        for (var k = a; k < b; k++) { acc += pool[Q.src + u32(k) * Q.w + u32(x)]; }
     }
-    stats[i] = acc / f32(b - a);
+    pool[Q.dst + i] = acc / f32(b - a);
 }
 
-// Linear coefficients: stats = (mean I, mean I^2) -> ab = (a, b).
+// Guided-filter coefficients from means (I, p, Ip, II): (a, b, 0, 0); eps = k.x.
 @compute @workgroup_size(256)
-fn coeff_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+fn coeffs(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = index(gid, nwg);
-    if (i >= P.dims.z * P.dims.w) { return; }
-    let m = stats[i];
-    let v = max(m.y - m.x * m.x, 0.0);
-    let a = v / (v + P.local.z);
-    ab[i] = vec2<f32>(a, m.x - a * m.x);
+    if (i >= Q.w * Q.h) { return; }
+    let m = pool[Q.src + i];
+    let v = max(m.w - m.x * m.x, 0.0);
+    let cov = m.z - m.x * m.y;
+    let a = cov / (v + Q.k.x);
+    pool[Q.dst + i] = vec4<f32>(a, m.y - a * m.x, 0.0, 0.0);
 }
 
-// Bilinear sample of the reduced (mean a, mean b) planes; pixel centres at integer + 0.5.
-fn sample_ab(fx: f32, fy: f32) -> vec2<f32> {
+// Bilinear sample of a reduced coefficient plane (pixel centres at integer + 0.5).
+fn sample_plane(off: u32, fx: f32, fy: f32) -> vec2<f32> {
     let sw = P.dims.z;
     let sh = P.dims.w;
     let x = clamp(fx - 0.5, 0.0, f32(sw - 1u));
@@ -199,12 +222,31 @@ fn sample_ab(fx: f32, fy: f32) -> vec2<f32> {
     let y1 = min(y0 + 1u, sh - 1u);
     let tx = x - f32(x0);
     let ty = y - f32(y0);
-    let top = stats[y0 * sw + x0] * (1.0 - tx) + stats[y0 * sw + x1] * tx;
-    let bot = stats[y1 * sw + x0] * (1.0 - tx) + stats[y1 * sw + x1] * tx;
+    let top = pool[off + y0 * sw + x0].xy * (1.0 - tx) + pool[off + y0 * sw + x1].xy * tx;
+    let bot = pool[off + y1 * sw + x0].xy * (1.0 - tx) + pool[off + y1 * sw + x1].xy * tx;
     return top * (1.0 - ty) + bot * ty;
 }
 
-// --- Stage 5-7: tone, point curve, output conversion, orientation ----------------------------
+// Recover (or add) haze in the scene plane, then refresh log Y.
+@compute @workgroup_size(256)
+fn dehaze_apply(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    let w = P.dims.x;
+    if (i >= w * P.dims.y) { return; }
+    var c = pool[P.offs.x + i].xyz;
+    let a = P.haze.xyz;
+    if (P.haze2.y > 0.0) {
+        c = c * (1.0 - P.haze2.y) + a * P.haze2.y;
+    } else {
+        let inv = 1.0 / f32(P.dims2.x);
+        let m = sample_plane(P.flags.w, (f32(i % w) + 0.5) * inv, (f32(i / w) + 0.5) * inv);
+        let g = clamp(luma(c) / P.haze.w, 0.0, 2.0);
+        let t = clamp(m.x * g + m.y, 0.1, 1.0);
+        c = max((c - a) / t + a, vec3<f32>(0.0));
+    }
+    pool[P.offs.x + i] = vec4<f32>(c, log2(max(luma(c), 1.0e-6)));
+}
+
 
 fn aces_fit(x0: f32) -> f32 {
     let x = max(x0, 0.0);
@@ -339,6 +381,7 @@ fn oriented_source(dx: u32, dy: u32, code: u32) -> vec2<u32> {
     }
 }
 
+
 @compute @workgroup_size(256)
 fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
     let i = index(gid, nwg);
@@ -346,26 +389,40 @@ fn final_pass(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     if (i >= ow * P.dims3.y) { return; }
     let s = oriented_source(i % ow, i / ow, P.dims2.z);
     let j = s.y * P.dims.x + s.x;
-    var c = vec3<f32>(scene[3u * j], scene[3u * j + 1u], scene[3u * j + 2u]);
+    let px = pool[P.offs.x + j];
+    var c = px.xyz;
+    let l = px.w;
 
-    if (P.local.w > 0.5) {
-        let inv = 1.0 / f32(P.dims2.x);
-        let m = sample_ab((f32(s.x) + 0.5) * inv, (f32(s.y) + 0.5) * inv);
-        let base = m.x * logy[j] + m.y;
-        let d = base - P.tone.w;
-        let w_shadow = 1.0 - smoothstep_(-5.0, 0.5, d);
-        let w_high = smoothstep_(-0.5, 3.0, d);
-        c *= exp2(P.local.x * w_shadow + P.local.y * w_high);
+    // Local gain: shadows/highlights, clarity, texture (local.rs local_gains).
+    let inv = 1.0 / f32(P.dims2.x);
+    let fx = (f32(s.x) + 0.5) * inv;
+    let fy = (f32(s.y) + 0.5) * inv;
+    var d = 0.0;
+    if (P.flags.x != 0u) {
+        let m = sample_plane(P.offs.y, fx, fy);
+        let b = m.x * l + m.y - P.tone.w;
+        d += P.local.x * (1.0 - smoothstep_(-5.0, 0.5, b)) + P.local.y * smoothstep_(-0.5, 3.0, b);
     }
+    if (P.flags.y != 0u) {
+        let m = sample_plane(P.offs.z, fx, fy);
+        let base = m.x * l + m.y;
+        let mg = base - P.tone.w;
+        d += P.local.z * (l - base) * exp(-(mg * mg) / 8.0);
+    }
+    if (P.flags.z != 0u) {
+        let dt = l - pool[P.offs.w + j].w;
+        d += P.local.w * dt / (1.0 + abs(dt) / 0.35);
+    }
+    if (P.flags.x != 0u || P.flags.y != 0u || P.flags.z != 0u) { c *= exp2(d); }
 
-    var d = look(tone(c));
+    var e = look(tone(c));
     if (P.dims2.w != 0u) {
         for (var k = 0; k < 3; k++) {
-            d[k] = srgb_decode(curve(srgb_encode(clamp(d[k], 0.0, 1.0))));
+            e[k] = srgb_decode(curve(srgb_encode(clamp(e[k], 0.0, 1.0))));
         }
     }
-    let lin = gamut_map(vec3<f32>(dot(P.o0.xyz, d), dot(P.o1.xyz, d), dot(P.o2.xyz, d)));
-    let e = vec3<f32>(srgb_encode(lin.x), srgb_encode(lin.y), srgb_encode(lin.z));
-    let q = vec3<u32>(e * 255.0 + vec3<f32>(0.5));
+    let lin = gamut_map(vec3<f32>(dot(P.o0.xyz, e), dot(P.o1.xyz, e), dot(P.o2.xyz, e)));
+    let enc = vec3<f32>(srgb_encode(lin.x), srgb_encode(lin.y), srgb_encode(lin.z));
+    let q = vec3<u32>(enc * 255.0 + vec3<f32>(0.5));
     out_rgba[i] = q.x | (q.y << 8u) | (q.z << 16u) | (255u << 24u);
 }

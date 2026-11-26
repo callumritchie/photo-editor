@@ -4,7 +4,7 @@
 //! 1. demosaic (camera-native, pre white balance)
 //! 2. white balance + highlight reconstruction (camera space)
 //! 3. camera -> linear Rec.2020 working space; exposure
-//! 4. local tone (shadows / highlights)
+//! 4. dehaze; local tone (shadows / highlights, clarity, texture)
 //! 5. contrast, filmic display transform (whites), black level; colour (mixer, vibrance/saturation,
 //!    black and white, grading)
 //! 6. Rec.2020 -> linear sRGB, gamut mapping, sRGB encoding
@@ -14,6 +14,7 @@
 
 pub mod demosaic;
 pub mod filter;
+pub mod local;
 pub mod look;
 pub mod orient;
 pub mod settings;
@@ -187,14 +188,11 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
     let (w, h) = (scene.width, scene.height);
     let mut data = scene.data;
 
-    if let Some(gains) = tone::local_tone_gains(
-        &data,
-        w,
-        h,
-        REC2020_LUMA,
-        settings.shadows,
-        settings.highlights,
-    ) {
+    if settings.dehaze != 0.0 {
+        let a = local::airlight(&local::airlight_samples(&data, w, h));
+        local::dehaze(&mut data, w, h, settings.dehaze, a);
+    }
+    if let Some(gains) = local::local_gains(&data, w, h, &settings) {
         data.par_chunks_mut(3)
             .zip(gains.par_iter())
             .for_each(|(px, g)| {
@@ -267,17 +265,20 @@ pub fn render_scene(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, R
 
     let mut data = cam;
     data.par_chunks_mut(3).for_each(|px| {
-        let balanced = reconstruct_highlights([px[0], px[1], px[2]], wb);
-        let work = apply(&to_work, balanced);
-        px[0] = work[0] * gain;
-        px[1] = work[1] * gain;
-        px[2] = work[2] * gain;
+        px.copy_from_slice(&scene_pixel([px[0], px[1], px[2]], wb, &to_work, gain));
     });
     Ok(RgbImage {
         width: frame.width,
         height: frame.height,
         data,
     })
+}
+
+/// Camera RGB -> scene-linear Rec.2020 for one pixel: white balance with highlight reconstruction,
+/// colour matrix, exposure gain.
+#[inline]
+pub fn scene_pixel(cam: [f32; 3], wb: [f32; 3], to_work: &Mat3, gain: f32) -> [f32; 3] {
+    apply(to_work, reconstruct_highlights(cam, wb)).map(|v| v * gain)
 }
 
 /// White-balance one camera pixel and repair clipped channels.

@@ -22,6 +22,8 @@ pub enum Group {
     Whites,
     Blacks,
     ToneCurve,
+    /// Texture, clarity and dehaze.
+    Presence,
     /// Vibrance and saturation.
     Color,
     ColorMixer,
@@ -33,7 +35,7 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 13] = [
+    pub const ALL: [Group; 14] = [
         Group::WhiteBalance,
         Group::Exposure,
         Group::Contrast,
@@ -42,6 +44,7 @@ impl Group {
         Group::Whites,
         Group::Blacks,
         Group::ToneCurve,
+        Group::Presence,
         Group::Color,
         Group::ColorMixer,
         Group::BlackWhite,
@@ -64,6 +67,7 @@ impl Group {
             Group::Whites => "Whites",
             Group::Blacks => "Blacks",
             Group::ToneCurve => "Tone Curve",
+            Group::Presence => "Texture, Clarity & Dehaze",
             Group::Color => "Vibrance & Saturation",
             Group::ColorMixer => "Color Mixer",
             Group::BlackWhite => "Black & White",
@@ -83,6 +87,7 @@ impl Group {
             Group::Whites => &["whites"],
             Group::Blacks => &["blacks"],
             Group::ToneCurve => &["toneCurve"],
+            Group::Presence => &["texture", "clarity", "dehaze"],
             Group::Color => &["vibrance", "saturation"],
             Group::ColorMixer => &["hsl"],
             Group::BlackWhite => &["treatment", "bwMix"],
@@ -209,6 +214,9 @@ fn build_params() -> Vec<ParamSpec> {
         spec("shadows", "Shadows", Group::Shadows, "Tone"),
         spec("whites", "Whites", Group::Whites, "Tone"),
         spec("blacks", "Blacks", Group::Blacks, "Tone"),
+        spec("texture", "Texture", Group::Presence, "Presence"),
+        spec("clarity", "Clarity", Group::Presence, "Presence"),
+        spec("dehaze", "Dehaze", Group::Presence, "Presence"),
         spec("vibrance", "Vibrance", Group::Color, "Presence"),
         spec("saturation", "Saturation", Group::Color, "Presence"),
     ];

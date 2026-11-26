@@ -86,6 +86,25 @@ fn cases() -> Vec<(&'static str, Settings)> {
             },
         ),
         (
+            "texture, clarity, dehaze",
+            Settings {
+                texture: 70.0,
+                clarity: 60.0,
+                dehaze: 50.0,
+                shadows: 30.0,
+                ..d.clone()
+            },
+        ),
+        (
+            "negative texture/clarity, add haze",
+            Settings {
+                texture: -80.0,
+                clarity: -60.0,
+                dehaze: -40.0,
+                ..d.clone()
+            },
+        ),
+        (
             "black & white, grading",
             Settings {
                 treatment: pe_pipeline::Treatment::Monochrome,

@@ -17,8 +17,6 @@
 //!   brought in by desaturating towards the pixel's luminance.
 //! - **Point curve**: monotone cubic (Fritsch & Carlson 1980) through user points, on encoded values.
 
-use crate::filter::{fast_guided_filter, Plane};
-use rayon::prelude::*;
 
 pub const MID_GREY: f32 = 0.18;
 /// Maximum base-layer shift for Shadows/Highlights at +/-100, in stops.
@@ -45,45 +43,19 @@ pub fn local_tone_geometry(width: usize, height: usize) -> (usize, usize) {
     (radius, (short / 512).max(1))
 }
 
+/// Shadows/highlights shift (stops) for a base log2-luminance `d` relative to mid-grey.
+#[inline]
+pub fn local_tone_shift(d: f32, shadow_ev: f32, highlight_ev: f32) -> f32 {
+    let w_shadow = 1.0 - smoothstep(-5.0, 0.5, d);
+    let w_high = smoothstep(-0.5, 3.0, d);
+    shadow_ev * w_shadow + highlight_ev * w_high
+}
+
 /// Base-layer shifts in stops for the Shadows and Highlights sliders.
 pub fn local_tone_amounts(shadows: f32, highlights: f32) -> (f32, f32) {
     (
         shadows / 100.0 * LOCAL_MAX_EV,
         highlights / 100.0 * LOCAL_MAX_EV,
-    )
-}
-
-/// Per-pixel gain (multiplier) implementing Shadows/Highlights. Returns `None` if both are zero.
-pub fn local_tone_gains(
-    rgb: &[f32],
-    width: usize,
-    height: usize,
-    weights: [f32; 3],
-    shadows: f32,
-    highlights: f32,
-) -> Option<Vec<f32>> {
-    if shadows == 0.0 && highlights == 0.0 {
-        return None;
-    }
-    let log_y: Vec<f32> = rgb
-        .par_chunks(3)
-        .map(|px| luminance(px, weights).max(1e-6).log2())
-        .collect();
-    let plane = Plane::new(width, height, log_y);
-    let (radius, factor) = local_tone_geometry(width, height);
-    let base = fast_guided_filter(&plane, radius, LOCAL_EPS, factor);
-    let grey = MID_GREY.log2();
-    let (s, h) = local_tone_amounts(shadows, highlights);
-    Some(
-        base.data
-            .par_iter()
-            .map(|&b| {
-                let d = b - grey;
-                let w_shadow = 1.0 - smoothstep(-5.0, 0.5, d);
-                let w_high = smoothstep(-0.5, 3.0, d);
-                (s * w_shadow + h * w_high).exp2()
-            })
-            .collect(),
     )
 }
 
@@ -316,27 +288,5 @@ mod tests {
             prev = y;
         }
         assert!((c.apply(64.0 / 255.0) - 40.0 / 255.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn local_tone_lifts_shadows_only_where_dark() {
-        let (w, h) = (64, 32);
-        let rgb: Vec<f32> = (0..w * h)
-            .flat_map(|i| {
-                let v = if i % w < w / 2 { 0.01 } else { 0.5 };
-                [v, v, v]
-            })
-            .collect();
-        let g = local_tone_gains(&rgb, w, h, W, 100.0, 0.0).unwrap();
-        assert!(
-            g[h / 2 * w + 5] > 2.0,
-            "dark side lifted: {}",
-            g[h / 2 * w + 5]
-        );
-        assert!(
-            g[h / 2 * w + 60] < 1.1,
-            "bright side ~unchanged: {}",
-            g[h / 2 * w + 60]
-        );
     }
 }

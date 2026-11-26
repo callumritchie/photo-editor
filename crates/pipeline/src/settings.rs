@@ -114,6 +114,12 @@ pub struct Settings {
     pub blacks: f32,
     /// Point curve on display-encoded values, as (input, output) pairs on 0..255. Empty = identity.
     pub tone_curve: Vec<[f32; 2]>,
+    /// Fine detail: + enhances, - smooths. -100..100.
+    pub texture: f32,
+    /// Midtone local contrast: + adds punch, - softens. -100..100.
+    pub clarity: f32,
+    /// Remove (+) or add (-) atmospheric haze. -100..100.
+    pub dehaze: f32,
     /// Boost (+) or mute (-) colour, mostly in less saturated areas and sparing skin. -100..100.
     pub vibrance: f32,
     /// Colour intensity of everything equally. -100..100 (-100 = greyscale).
@@ -140,6 +146,9 @@ impl Default for Settings {
             whites: 0.0,
             blacks: 0.0,
             tone_curve: Vec::new(),
+            texture: 0.0,
+            clarity: 0.0,
+            dehaze: 0.0,
             vibrance: 0.0,
             saturation: 0.0,
             hsl: Hsl::default(),
@@ -163,6 +172,9 @@ impl Settings {
             &mut self.shadows,
             &mut self.whites,
             &mut self.blacks,
+            &mut self.texture,
+            &mut self.clarity,
+            &mut self.dehaze,
             &mut self.vibrance,
             &mut self.saturation,
             &mut g.balance,

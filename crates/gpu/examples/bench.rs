@@ -28,6 +28,39 @@ fn main() {
                 ..Default::default()
             },
         ),
+        (
+            "dehaze only",
+            Settings {
+                dehaze: 30.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "clarity only",
+            Settings {
+                clarity: 40.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "texture only",
+            Settings {
+                texture: 40.0,
+                ..Default::default()
+            },
+        ),
+        (
+            "all local + colour",
+            Settings {
+                shadows: 40.0,
+                highlights: -40.0,
+                clarity: 40.0,
+                texture: 40.0,
+                dehaze: 30.0,
+                vibrance: 30.0,
+                ..Default::default()
+            },
+        ),
     ] {
         let mut best = f64::MAX;
         for i in 0..10 {
