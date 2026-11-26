@@ -50,8 +50,14 @@ pub struct Geometry {
 }
 
 pub fn geometry(w: usize, h: usize) -> Geometry {
-    let short = w.min(h);
-    let (radius, factor) = tone::local_tone_geometry(w, h);
+    geometry_in(w, h, w, h)
+}
+
+/// Geometry for a `w` x `h` part of a `full_w` x `full_h` picture: radii and factor from the whole
+/// picture, reduced-grid size from the part.
+pub fn geometry_in(w: usize, h: usize, full_w: usize, full_h: usize) -> Geometry {
+    let short = full_w.min(full_h);
+    let (radius, factor) = tone::local_tone_geometry(full_w, full_h);
     let frac = |f: f32, min: f32| (short as f32 * f).round().max(min) as usize;
     Geometry {
         factor,
@@ -157,6 +163,18 @@ pub fn guided_coeffs(guide: &Plane, input: &Plane, r: usize, eps: f32) -> (Plane
 
 /// Remove (amount > 0) or add (amount < 0) haze, in place. `a` is the airlight.
 pub fn dehaze(rgb: &mut [f32], w: usize, h: usize, amount: f32, a: [f32; 3]) {
+    dehaze_in(rgb, w, h, amount, a, (w, h));
+}
+
+/// [`dehaze`] on part of a picture of size `full`.
+pub fn dehaze_in(
+    rgb: &mut [f32],
+    w: usize,
+    h: usize,
+    amount: f32,
+    a: [f32; 3],
+    full: (usize, usize),
+) {
     if amount == 0.0 {
         return;
     }
@@ -169,7 +187,7 @@ pub fn dehaze(rgb: &mut [f32], w: usize, h: usize, amount: f32, a: [f32; 3]) {
         });
         return;
     }
-    let g = geometry(w, h);
+    let g = geometry_in(w, h, full.0, full.1);
     let omega = amount / 100.0 * 0.95;
     let ya = luma(&a).max(1e-6);
     // Reduced-grid colour (block means), then dark channel and guide.
@@ -244,6 +262,19 @@ pub fn local_planes(
     need_clarity: bool,
     need_texture: bool,
 ) -> LocalPlanes {
+    local_planes_in(rgb, w, h, s, need_clarity, need_texture, (w, h))
+}
+
+/// [`local_planes`] on part of a picture of size `full`.
+pub fn local_planes_in(
+    rgb: &[f32],
+    w: usize,
+    h: usize,
+    s: &Settings,
+    need_clarity: bool,
+    need_texture: bool,
+    full: (usize, usize),
+) -> LocalPlanes {
     let sh = s.shadows != 0.0 || s.highlights != 0.0;
     let (cl, tx) = (
         s.clarity != 0.0 || need_clarity,
@@ -253,7 +284,7 @@ pub fn local_planes(
     if !(sh || cl || tx) {
         return LocalPlanes::default();
     }
-    let g = geometry(w, h);
+    let g = geometry_in(w, h, full.0, full.1);
     let logy: Vec<f32> = rgb
         .par_chunks(3)
         .map(|p| luma(p).max(1e-6).log2())

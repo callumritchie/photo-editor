@@ -22,6 +22,7 @@ pub mod local;
 pub mod look;
 pub mod masks;
 pub mod orient;
+pub mod region;
 pub mod select;
 pub mod settings;
 pub mod tone;
@@ -195,23 +196,43 @@ struct SceneStage {
     data: Vec<f32>,
     w: usize,
     h: usize,
+    ctx: region::Ctx,
     planes: local::LocalPlanes,
     geo: geometry::GeometryParams,
     mp: masks::MaskParams,
 }
 
 fn scene_stage(frame: &RawFrame, settings: &Settings) -> Result<SceneStage, RenderError> {
-    let scene = render_scene(frame, settings)?;
+    scene_stage_in(
+        frame,
+        settings,
+        &region::Ctx::whole(frame.width, frame.height),
+        &region::Globals::default(),
+    )
+}
+
+fn scene_stage_in(
+    frame: &RawFrame,
+    settings: &Settings,
+    ctx: &region::Ctx,
+    globals: &region::Globals,
+) -> Result<SceneStage, RenderError> {
+    let scene = render_scene_in(frame, settings, ctx, globals)?;
     let (w, h) = (scene.width, scene.height);
     let mut data = scene.data;
 
     // Dehaze's airlight is estimated on the scene before noise reduction and sharpening (the GPU host
     // computes it from the same scene pixels).
-    let airlight =
-        (settings.dehaze != 0.0).then(|| local::airlight(&local::airlight_samples(&data, w, h)));
+    let airlight = (settings.dehaze != 0.0).then(|| {
+        globals
+            .airlight
+            .unwrap_or_else(|| local::airlight(&local::airlight_samples(&data, w, h)))
+    });
     let dp = detail::DetailParams::new(settings, [0.0; 3], frame.scale);
     if dp.enabled() {
-        let noise = if dp.nr {
+        let noise = if let (true, Some(n)) = (dp.nr, globals.noise) {
+            n
+        } else if dp.nr {
             // Measured without exposure (so exposure changes need no new measurement) and scaled:
             // noise of sqrt(g x) is sqrt(g) times that of sqrt(x).
             let g = settings.exposure.exp2();
@@ -230,12 +251,21 @@ fn scene_stage(frame: &RawFrame, settings: &Settings) -> Result<SceneStage, Rend
             &detail::DetailParams::new(settings, noise, frame.scale),
         );
     }
+    let full = (ctx.full_w, ctx.full_h);
     if let Some(a) = airlight {
-        local::dehaze(&mut data, w, h, settings.dehaze, a);
+        local::dehaze_in(&mut data, w, h, settings.dehaze, a, full);
     }
-    let geo = geometry::GeometryParams::new(settings, w, h, frame.orientation);
+    let geo = geometry::GeometryParams::new(settings, ctx.full_w, ctx.full_h, frame.orientation);
     let mp = masks::MaskParams::new(&settings.masks, &settings.rasters, geo.frame_w, geo.frame_h);
-    let planes = local::local_planes(&data, w, h, settings, mp.needs_clarity, mp.needs_texture);
+    let planes = local::local_planes_in(
+        &data,
+        w,
+        h,
+        settings,
+        mp.needs_clarity,
+        mp.needs_texture,
+        full,
+    );
     if let Some(gains) = &planes.gains {
         data.par_chunks_mut(3)
             .zip(gains.par_iter())
@@ -250,6 +280,7 @@ fn scene_stage(frame: &RawFrame, settings: &Settings) -> Result<SceneStage, Rend
         data,
         w,
         h,
+        ctx: *ctx,
         planes,
         geo,
         mp,
@@ -364,15 +395,59 @@ pub fn pick_color(
 }
 
 pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
+    render_display_in(frame, settings, None, &region::Globals::default())
+}
+
+/// Render part of a picture: `frame` holds the sensor pixels of the region (plus margin) described
+/// by `region`, and only the region's output rectangle is produced. Display-linear like
+/// [`render_display`].
+pub fn render_region_display(
+    frame: &RawFrame,
+    settings: &Settings,
+    region: &region::Region,
+    globals: &region::Globals,
+) -> Result<RgbImage, RenderError> {
+    render_display_in(frame, settings, Some(region), globals)
+}
+
+/// [`render_region_display`] encoded to sRGB, like [`render`].
+pub fn render_region(
+    frame: &RawFrame,
+    settings: &Settings,
+    region: &region::Region,
+    globals: &region::Globals,
+) -> Result<RgbImage, RenderError> {
+    Ok(encode_output(
+        &render_region_display(frame, settings, region, globals)?,
+        ColorSpace::Srgb,
+    ))
+}
+
+fn render_display_in(
+    frame: &RawFrame,
+    settings: &Settings,
+    region: Option<&region::Region>,
+    globals: &region::Globals,
+) -> Result<RgbImage, RenderError> {
     let settings = settings.clone().clamped();
+    let ctx = match region {
+        Some(r) => region::Ctx {
+            full_w: r.full_w,
+            full_h: r.full_h,
+            x0: r.x0,
+            y0: r.y0,
+        },
+        None => region::Ctx::whole(frame.width, frame.height),
+    };
     let SceneStage {
         mut data,
         w,
         h,
+        ctx,
         planes,
         geo,
         mp,
-    } = scene_stage(frame, &settings)?;
+    } = scene_stage_in(frame, &settings, &ctx, globals)?;
     let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks);
     let look_params = look::LookParams::new(&settings);
     // The point curve is defined on sRGB-encoded display values, independent of the output space.
@@ -390,7 +465,13 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
                 let i = y * w + x;
                 let cd = planes.clarity.as_ref().map_or(0.0, |p| p[i]);
                 let td = planes.texture.as_ref().map_or(0.0, |p| p[i]);
-                let (fx, fy) = masks::frame_position(x, y, w, h, geo.orientation);
+                let (fx, fy) = masks::frame_position(
+                    x + ctx.x0,
+                    y + ctx.y0,
+                    ctx.full_w,
+                    ctx.full_h,
+                    geo.orientation,
+                );
                 let at = masks::PixelContext {
                     x: fx,
                     y: fy,
@@ -414,19 +495,38 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
         }
     });
 
-    let (w, h, mut data) = if geo.active {
-        geometry::resample(&data, &geo)
-    } else if geo.orientation != 1 {
-        orient::apply(geo.orientation, w, h, &data)
-    } else {
-        (w, h, data)
+    // Geometry and orientation; a region always resamples (its output rectangle may need any
+    // transform), using whole-picture coordinates.
+    let (full_ow, full_oh) = geo.output_size();
+    let (ox, oy, w, h, mut data) = match region {
+        Some(r) => {
+            let [ox, oy, ow, oh] = r.out;
+            let (_, _, d) = geometry::resample_region(&data, w, h, &ctx, &geo, r.out);
+            (ox, oy, ow, oh, d)
+        }
+        None if geo.active => {
+            let (w, h, d) = geometry::resample(&data, &geo);
+            (0, 0, w, h, d)
+        }
+        None if geo.orientation != 1 => {
+            let (w, h, d) = orient::apply(geo.orientation, w, h, &data);
+            (0, 0, w, h, d)
+        }
+        None => (0, 0, w, h, data),
     };
-    // Effects work in output coordinates.
-    let fx = effects::EffectsParams::new(&settings, w, h);
+    // Effects work in whole-picture output coordinates.
+    let fx = effects::EffectsParams::new(&settings, full_ow, full_oh);
     if fx.enabled() {
         data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
             for (x, px) in row.chunks_mut(3).enumerate() {
-                px.copy_from_slice(&fx.apply([px[0], px[1], px[2]], x, y, w, h, REC2020_LUMA));
+                px.copy_from_slice(&fx.apply(
+                    [px[0], px[1], px[2]],
+                    x + ox,
+                    y + oy,
+                    full_ow,
+                    full_oh,
+                    REC2020_LUMA,
+                ));
             }
         });
     }
@@ -458,22 +558,33 @@ pub fn encode_output(img: &RgbImage, space: ColorSpace) -> RgbImage {
 
 /// Stages 1-3: scene-linear Rec.2020 after white balance, highlight reconstruction and exposure.
 pub fn render_scene(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, RenderError> {
-    let cam = match (&frame.layout, settings.demosaic) {
-        (Layout::Mosaic(cfa), Demosaic::Auto) => {
-            demosaic::high_quality(&frame.data, frame.width, frame.height, cfa)
-        }
-        (Layout::Mosaic(cfa), Demosaic::Fast) => {
-            demosaic::neighbourhood_average(&frame.data, frame.width, frame.height, cfa)
-        }
-        (Layout::LinearRgb, _) => frame.data.clone(),
+    render_scene_in(
+        frame,
+        settings,
+        &region::Ctx::whole(frame.width, frame.height),
+        &region::Globals::default(),
+    )
+}
+
+/// [`render_scene`] for a frame that is part of a larger one (`ctx`), with optional whole-picture
+/// measurements.
+pub fn render_scene_in(
+    frame: &RawFrame,
+    settings: &Settings,
+    ctx: &region::Ctx,
+    globals: &region::Globals,
+) -> Result<RgbImage, RenderError> {
+    let cam = camera_rgb(frame, settings);
+    let wb = match (&settings.white_balance, globals.auto_wb) {
+        (WhiteBalance::Auto, Some(m)) => m,
+        (mode, _) => wb::multipliers(frame, mode, &cam),
     };
-    let wb = wb::multipliers(frame, &settings.white_balance, &cam);
     let to_work: Mat3 = pe_colour::camera_to_space(&frame.xyz_to_cam, &REC2020_TO_XYZ_D65)
         .ok_or(RenderError::SingularMatrix)?;
     let gain = settings.exposure.exp2();
 
     let mut data = cam;
-    let geo = geometry::GeometryParams::new(settings, frame.width, frame.height, frame.orientation);
+    let geo = geometry::GeometryParams::new(settings, ctx.full_w, ctx.full_h, frame.orientation);
     let lens = geo.lens_vignette != 0.0;
     data.par_chunks_mut(frame.width * 3)
         .enumerate()
@@ -481,7 +592,7 @@ pub fn render_scene(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, R
             for (x, px) in row.chunks_mut(3).enumerate() {
                 let mut c = scene_pixel([px[0], px[1], px[2]], wb, &to_work, gain);
                 if lens {
-                    let g = geo.lens_gain(x, y);
+                    let g = geo.lens_gain(x + ctx.x0, y + ctx.y0);
                     c = c.map(|v| v * g);
                 }
                 px.copy_from_slice(&c);
@@ -491,6 +602,44 @@ pub fn render_scene(frame: &RawFrame, settings: &Settings) -> Result<RgbImage, R
         width: frame.width,
         height: frame.height,
         data,
+    })
+}
+
+/// Demosaiced camera RGB (before white balance).
+pub fn camera_rgb(frame: &RawFrame, settings: &Settings) -> Vec<f32> {
+    match (&frame.layout, settings.demosaic) {
+        (Layout::Mosaic(cfa), Demosaic::Auto) => {
+            demosaic::high_quality(&frame.data, frame.width, frame.height, cfa)
+        }
+        (Layout::Mosaic(cfa), Demosaic::Fast) => {
+            demosaic::neighbourhood_average(&frame.data, frame.width, frame.height, cfa)
+        }
+        (Layout::LinearRgb, _) => frame.data.clone(),
+    }
+}
+
+/// Measure the whole-picture quantities a region render needs ([`region::Globals`]) exactly as a
+/// full render of `frame` would.
+pub fn measure_globals(
+    frame: &RawFrame,
+    settings: &Settings,
+) -> Result<region::Globals, RenderError> {
+    let s = settings.clone().clamped();
+    let cam = camera_rgb(frame, &s);
+    let auto_wb = wb::multipliers(frame, &WhiteBalance::Auto, &cam);
+    let scene = render_scene(frame, &s)?;
+    let (w, h, data) = (scene.width, scene.height, scene.data);
+    let airlight = local::airlight(&local::airlight_samples(&data, w, h));
+    let g = s.exposure.exp2();
+    let noise = detail::noise_sigma(w, h, |x, y| {
+        let i = (y * w + x) * 3;
+        [data[i] / g, data[i + 1] / g, data[i + 2] / g]
+    })
+    .map(|v| v * g.sqrt());
+    Ok(region::Globals {
+        auto_wb: Some(auto_wb),
+        airlight: Some(airlight),
+        noise: Some(noise),
     })
 }
 

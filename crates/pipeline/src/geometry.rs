@@ -202,6 +202,37 @@ pub fn resample(img: &[f32], p: &GeometryParams) -> (usize, usize, Vec<f32>) {
     (w, h, out)
 }
 
+/// Resample the output rectangle `out` (x, y, w, h in whole-picture output coordinates) from a
+/// sensor-space region whose pixels start at (`ctx.x0`, `ctx.y0`) of the whole frame. `p` describes
+/// the whole picture; even with no geometry set, this applies the orientation.
+pub fn resample_region(
+    img: &[f32],
+    rw: usize,
+    rh: usize,
+    ctx: &crate::region::Ctx,
+    p: &GeometryParams,
+    out: [usize; 4],
+) -> (usize, usize, Vec<f32>) {
+    let [ox, oy, w, h] = out;
+    // With no geometry, the mapping uses the oriented frame as the output.
+    let mut q = *p;
+    if !q.active {
+        q.out_w = q.frame_w;
+        q.out_h = q.frame_h;
+        q.crop = [0.0, 0.0, 1.0, 1.0];
+    }
+    let mut data = vec![0.0; w * h * 3];
+    data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            for c in 0..3 {
+                let (fx, fy) = q.source(x + ox, y + oy, c);
+                row[x * 3 + c] = bilinear(img, rw, rh, fx - ctx.x0 as f32, fy - ctx.y0 as f32, c);
+            }
+        }
+    });
+    (w, h, data)
+}
+
 /// Scale of the largest centred rectangle with the frame's aspect ratio that fits inside the frame
 /// rotated by `angle_deg` (for auto-cropping when straightening).
 pub fn straighten_fit(w: f32, h: f32, angle_deg: f32) -> f32 {

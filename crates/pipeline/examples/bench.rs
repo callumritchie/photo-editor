@@ -46,6 +46,11 @@ fn main() {
     time("preview render (shadows/highlights)", 5, || {
         render(&preview, &local).unwrap()
     });
+    if let pe_raw::Layout::Mosaic(cfa) = &frame.layout {
+        time("full demosaic only", 1, || {
+            pe_pipeline::demosaic::high_quality(&frame.data, frame.width, frame.height, cfa)
+        });
+    }
     time("full render_display (shadows/highlights)", 1, || {
         render_display(&frame, &local).unwrap()
     });
