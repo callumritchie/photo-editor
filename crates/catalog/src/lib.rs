@@ -4,7 +4,9 @@
 pub mod develop;
 pub mod export;
 pub mod import;
+pub mod library;
 pub mod render;
+pub mod rules;
 pub mod schema;
 mod time;
 
@@ -17,10 +19,12 @@ use serde::Serialize;
 pub use develop::{DevelopCommand, DevelopState, HistoryStep, Preset, Snapshot};
 pub use export::ExportPreset;
 pub use import::{ImportMode, ImportOptions, ImportProgress, ImportReport};
+pub use library::{CollectionKind, CollectionRow, KeywordRow, LibraryCommand};
 pub use pe_develop::Group;
 pub use pe_export::{ExportReport, ExportSettings};
 pub use pe_pipeline::Settings;
 pub use render::{RenderJob, RenderStores};
+pub use rules::{Condition, Field, Match, Op, Rule, RuleSet};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -77,6 +81,14 @@ pub struct ImageRow {
     pub exposure_time: Option<f64>,
     pub f_number: Option<f64>,
     pub focal_length: Option<f64>,
+    /// Virtual copy: its name ("Copy 1"); `None` for an original.
+    pub copy_name: Option<String>,
+    pub master_id: Option<i64>,
+    pub stack_id: Option<i64>,
+    /// 0 = top of the stack.
+    pub stack_position: Option<i64>,
+    pub stack_size: i64,
+    pub stack_collapsed: bool,
 }
 
 /// A folder with its image count (direct children only).
@@ -90,10 +102,33 @@ pub struct FolderRow {
     pub image_count: i64,
 }
 
+/// Sort order of a grid query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Sort {
+    #[default]
+    CaptureTime,
+    FileName,
+    Rating,
+    Imported,
+}
+
 /// Grid query.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Query {
+    /// Photos in this collection (smart collections are evaluated).
+    pub collection_id: Option<i64>,
+    /// Photos with this keyword or one below it.
+    pub keyword_id: Option<i64>,
+    /// Free text: file name, camera, lens, keywords.
+    pub text: Option<String>,
+    /// Further conditions (the library filter bar).
+    pub rules: Option<RuleSet>,
+    /// Show only the top photo of collapsed stacks.
+    pub collapse_stacks: bool,
+    pub sort: Sort,
+    pub descending: bool,
     /// Restrict to one folder (and, if `recursive`, its subfolders).
     pub folder_id: Option<i64>,
     pub recursive: bool,
@@ -111,8 +146,12 @@ pub struct Catalog {
 }
 
 const IMAGE_SELECT: &str = "SELECT i.id, i.uuid, f.folder_id, r.path, fo.rel_path, f.name, i.capture_time, i.rating, i.flag,
-       i.label, i.orientation, i.camera_make, i.camera_model, i.lens, i.iso, i.exposure_time, i.f_number, i.focal_length
-FROM images i JOIN files f ON f.id = i.file_id JOIN folders fo ON fo.id = f.folder_id JOIN roots r ON r.id = fo.root_id";
+       i.label, i.orientation, i.camera_make, i.camera_model, i.lens, i.iso, i.exposure_time, i.f_number, i.focal_length,
+       i.copy_name, i.master_id, i.stack_id, i.stack_position,
+       CASE WHEN i.stack_id IS NULL THEN 0 ELSE (SELECT COUNT(*) FROM images s WHERE s.stack_id = i.stack_id) END,
+       COALESCE(st.collapsed, 0)
+FROM images i JOIN files f ON f.id = i.file_id JOIN folders fo ON fo.id = f.folder_id JOIN roots r ON r.id = fo.root_id
+LEFT JOIN stacks st ON st.id = i.stack_id";
 
 fn join_path(root: &str, rel: &str, name: &str) -> String {
     let mut p = PathBuf::from(root);
@@ -151,6 +190,12 @@ fn image_from_row(r: &rusqlite::Row) -> rusqlite::Result<ImageRow> {
         exposure_time: r.get(15)?,
         f_number: r.get(16)?,
         focal_length: r.get(17)?,
+        copy_name: r.get(18)?,
+        master_id: r.get(19)?,
+        stack_id: r.get(20)?,
+        stack_position: r.get(21)?,
+        stack_size: r.get(22)?,
+        stack_collapsed: r.get::<_, i64>(23)? != 0,
     })
 }
 
@@ -213,7 +258,65 @@ impl Catalog {
             sql += &format!(" AND i.label = ?{}", args.len() + 1);
             args.push(label.clone().into());
         }
-        sql += " ORDER BY i.capture_time IS NULL, i.capture_time, f.name, i.id";
+        // Collection, keyword and text filters are expressed as rules too.
+        let mut rules: Vec<Rule> = Vec::new();
+        if let Some(c) = q.collection_id {
+            rules.push(Rule::Condition(Condition {
+                field: Field::Collection,
+                op: Op::Is,
+                value: c.into(),
+                value2: serde_json::Value::Null,
+            }));
+        }
+        if let Some(t) = q.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            for word in t.split_whitespace() {
+                rules.push(Rule::Condition(Condition {
+                    field: Field::Text,
+                    op: Op::Contains,
+                    value: word.into(),
+                    value2: serde_json::Value::Null,
+                }));
+            }
+        }
+        if let Some(r) = &q.rules {
+            rules.push(Rule::Group(r.clone()));
+        }
+        if !rules.is_empty() {
+            let cond = rules::compile(
+                &RuleSet {
+                    matching: Match::All,
+                    rules,
+                },
+                &mut args,
+                self,
+            )
+            .map_err(|e| CatalogError::Invalid(e.to_string()))?;
+            sql += &format!(" AND {cond}");
+        }
+        if let Some(k) = q.keyword_id {
+            sql += &format!(
+                " AND EXISTS (SELECT 1 FROM image_keywords ik WHERE ik.image_id = i.id AND ik.keyword_id IN (
+                    WITH RECURSIVE d(id) AS (SELECT ?{n} UNION SELECT k.id FROM keywords k JOIN d ON k.parent_id = d.id)
+                    SELECT id FROM d))",
+                n = args.len() + 1
+            );
+            args.push(k.into());
+        }
+        if q.collapse_stacks {
+            sql += " AND (i.stack_id IS NULL OR st.collapsed = 0 OR i.stack_position = 0)";
+        }
+        let dir = if q.descending { "DESC" } else { "ASC" };
+        // Stack members stay together, top first, after their top photo.
+        let key = match q.sort {
+            Sort::CaptureTime => {
+                format!("i.capture_time IS NULL, i.capture_time {dir}, f.name {dir}")
+            }
+            Sort::FileName => format!("f.name {dir}, i.capture_time {dir}"),
+            Sort::Rating => format!("i.rating {dir}, i.capture_time, f.name"),
+            Sort::Imported => format!("i.imported_at {dir}, f.name"),
+        };
+        sql +=
+            &format!(" ORDER BY {key}, COALESCE(i.master_id, i.id), i.master_id IS NOT NULL, i.id");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(args), image_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

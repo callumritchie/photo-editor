@@ -53,9 +53,19 @@ enum Cmd {
         catalog: PathBuf,
         #[arg(long, default_value_t = 0)]
         min_rating: u8,
+        /// Full query as JSON, e.g. '{"collectionId": 3}' or '{"text": "owl", "collapseStacks": true}'.
+        #[arg(long)]
+        query: Option<String>,
         /// Print JSON instead of a table.
         #[arg(long)]
         json: bool,
+    },
+    /// Run a library command (JSON): collections, keywords, virtual copies, stacks, e.g.
+    /// `pe library Lib.pecat --command '{"command":"addKeywords","imageIds":[1],"paths":["Birds"]}'`.
+    Library {
+        catalog: PathBuf,
+        #[arg(long)]
+        command: String,
     },
     /// List folders in a catalog with image counts.
     Folders { catalog: PathBuf },
@@ -204,13 +214,16 @@ fn main() -> Result<()> {
         Cmd::Ls {
             catalog,
             min_rating,
+            query,
             json,
         } => {
             let cat = pe_catalog::Catalog::open(&catalog)?;
-            let rows = cat.images(&pe_catalog::Query {
-                min_rating,
-                ..Default::default()
-            })?;
+            let mut q: pe_catalog::Query = match query {
+                Some(s) => serde_json::from_str(&s)?,
+                None => Default::default(),
+            };
+            q.min_rating = q.min_rating.max(min_rating);
+            let rows = cat.images(&q)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
@@ -232,6 +245,15 @@ fn main() -> Result<()> {
             for f in pe_catalog::Catalog::open(&catalog)?.folders()? {
                 println!("{:>6}  {:>6}  {}", f.id, f.image_count, f.path);
             }
+            Ok(())
+        }
+        Cmd::Library { catalog, command } => {
+            let mut cat = pe_catalog::Catalog::open(&catalog)?;
+            let cmd: pe_catalog::LibraryCommand = serde_json::from_str(&command)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cat.library_execute(&cmd)?)?
+            );
             Ok(())
         }
         Cmd::Develop {

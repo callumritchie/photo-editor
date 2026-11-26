@@ -43,6 +43,9 @@ char *pe_catalog_presets_json(PeCatalog *h);
 char *pe_catalog_save_preset_json(PeCatalog *h, const char *name, const char *groups_json, const char *settings_json);
 bool pe_catalog_delete_preset(PeCatalog *h, int64_t id);
 
+/* Library: {"command": "collections" | "createCollection" | "addKeywords" | "stack" | ...} (see LibraryCommand) */
+char *pe_catalog_library_json(PeCatalog *h, const char *command_json);
+
 /* Export: settings/presets are ExportSettings JSON; returns {"written":[...],"skipped":[...],"failed":[[path,err],...]} */
 char *pe_catalog_export_json(PeCatalog *h, const int64_t *ids, size_t count, const char *settings_json,
                              PeProgressFn progress, void *ctx);

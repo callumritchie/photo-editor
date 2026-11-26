@@ -646,6 +646,27 @@ pub unsafe extern "C" fn pe_catalog_export_json(
     json_out(&pe_export::export(&items, &settings, &mut cb))
 }
 
+/// Run a library command (collections, keywords, virtual copies, stacks); see
+/// `pe_catalog::LibraryCommand`. Returns its JSON result or `{"error": ...}`.
+#[no_mangle]
+pub unsafe extern "C" fn pe_catalog_library_json(
+    h: *mut PeCatalog,
+    command_json: *const c_char,
+) -> *mut c_char {
+    let Some(c) = catalog(h) else {
+        return error_out("null catalog");
+    };
+    let cmd: pe_catalog::LibraryCommand = match str_in(command_json).map(serde_json::from_str) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => return error_out(e),
+        None => return error_out("missing command"),
+    };
+    match c.inner.lock().unwrap().library_execute(&cmd) {
+        Ok(v) => json_out(&v),
+        Err(e) => error_out(e),
+    }
+}
+
 /// Default export settings as JSON.
 #[no_mangle]
 pub extern "C" fn pe_export_defaults_json() -> *mut c_char {

@@ -10,7 +10,7 @@
 
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 const V1: &str = r#"
 CREATE TABLE meta (
@@ -132,6 +132,57 @@ CREATE TABLE export_presets (
 );
 "#;
 
+/// v4: library organisation. Collections (static, smart, and sets that contain them), hierarchical
+/// keywords, virtual copies (extra image rows sharing a file, each with its own develop settings) and
+/// stacks.
+const V4: &str = r#"
+CREATE TABLE stacks (
+    id        INTEGER PRIMARY KEY,
+    collapsed INTEGER NOT NULL DEFAULT 1 CHECK (collapsed IN (0, 1))
+);
+
+ALTER TABLE images ADD COLUMN master_id INTEGER REFERENCES images(id) ON DELETE CASCADE;
+ALTER TABLE images ADD COLUMN copy_name TEXT;
+ALTER TABLE images ADD COLUMN stack_id INTEGER REFERENCES stacks(id) ON DELETE SET NULL;
+ALTER TABLE images ADD COLUMN stack_position INTEGER;
+CREATE INDEX images_master ON images (master_id);
+CREATE INDEX images_stack ON images (stack_id, stack_position);
+
+CREATE TABLE collections (
+    id         INTEGER PRIMARY KEY,
+    uuid       TEXT NOT NULL UNIQUE,
+    parent_id  INTEGER REFERENCES collections(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('set', 'collection', 'smart')),
+    name       TEXT NOT NULL,
+    rules      TEXT,                     -- smart collections: JSON rule set (see rules.rs)
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX collections_parent ON collections (parent_id);
+
+CREATE TABLE collection_images (
+    collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    image_id      INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    added_at      INTEGER NOT NULL,
+    PRIMARY KEY (collection_id, image_id)
+);
+CREATE INDEX collection_images_image ON collection_images (image_id);
+
+CREATE TABLE keywords (
+    id        INTEGER PRIMARY KEY,
+    uuid      TEXT NOT NULL UNIQUE,
+    parent_id INTEGER REFERENCES keywords(id) ON DELETE CASCADE,
+    name      TEXT NOT NULL
+);
+CREATE INDEX keywords_parent ON keywords (parent_id, name);
+
+CREATE TABLE image_keywords (
+    image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    keyword_id INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    PRIMARY KEY (image_id, keyword_id)
+);
+CREATE INDEX image_keywords_keyword ON image_keywords (keyword_id);
+"#;
+
 /// Connection-level settings applied on every open.
 pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -165,6 +216,12 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V3)?;
         tx.pragma_update(None, "user_version", 3)?;
+        tx.commit()?;
+    }
+    if version < 4 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V4)?;
+        tx.pragma_update(None, "user_version", 4)?;
         tx.commit()?;
     }
     Ok(())
