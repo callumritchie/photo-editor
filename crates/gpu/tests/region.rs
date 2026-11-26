@@ -100,3 +100,51 @@ fn gpu_region_matches_cpu_region() {
         }
     }
 }
+
+#[test]
+fn gpu_demosaic_matches_cpu() {
+    let Some(gpu) = Gpu::new() else { return };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/raw");
+    for name in ["Nikon-D750.nef", "Fujifilm-X-T3.raf", "Canon-EOS_R6.cr3"] {
+        let p = dir.join(name);
+        if !p.exists() {
+            continue;
+        }
+        let frame = pe_raw::decode_file(&p).unwrap();
+        // A region (aligned to the CFA) keeps the test quick.
+        let period = match &frame.layout {
+            pe_raw::Layout::Mosaic(c) => c.width.max(c.height),
+            _ => 1,
+        };
+        let x0 = (frame.width / 3) / period * period;
+        let y0 = (frame.height / 3) / period * period;
+        let crop = crop_frame(&frame, x0, y0, 1500, 1000);
+        let t = std::time::Instant::now();
+        let gpu_rgb = gpu.demosaic(&crop).unwrap();
+        let gt = t.elapsed();
+        let t = std::time::Instant::now();
+        let cpu_rgb = pe_pipeline::camera_rgb(&crop, &pe_pipeline::Settings::default());
+        let ct = t.elapsed();
+        let worst = gpu_rgb
+            .data
+            .iter()
+            .zip(&cpu_rgb)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let differing = gpu_rgb
+            .data
+            .iter()
+            .zip(&cpu_rgb)
+            .filter(|(a, b)| (*a - *b).abs() > 1e-5)
+            .count();
+        eprintln!(
+            "{name}: worst {worst:e}, {differing} of {} values differ; GPU {gt:.1?}, CPU {ct:.1?}",
+            cpu_rgb.len()
+        );
+        // Only rounding may differ.
+        assert!(
+            worst < 1e-4 && differing * 10_000 < cpu_rgb.len(),
+            "{name}: worst {worst}, {differing} differ"
+        );
+    }
+}

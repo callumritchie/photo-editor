@@ -137,6 +137,10 @@ fn green_average(data: &[f32], width: usize, height: usize, cfa: &Cfa) -> Vec<f3
     g
 }
 
+/// Gradients closer than this (absolute plus relative) are a tie in [`green_hamilton_adams`].
+pub const HA_TIE_ABS: f32 = 1e-6;
+pub const HA_TIE_REL: f32 = 1e-4;
+
 /// Edge-directed green interpolation for 2x2 Bayer patterns.
 fn green_hamilton_adams(data: &[f32], width: usize, height: usize, cfa: &Cfa) -> Vec<f32> {
     // Mirror at the borders (x = -1 -> 1, x = -2 -> 2), which preserves the 2x2 CFA parity so
@@ -176,12 +180,15 @@ fn green_hamilton_adams(data: &[f32], width: usize, height: usize, cfa: &Cfa) ->
             let grad_v = (gu - gd).abs() + lap_v.abs();
             let est_h = (gl + gr) / 2.0 + lap_h / 4.0;
             let est_v = (gu + gd) / 2.0 + lap_v / 4.0;
-            let est = if grad_h < grad_v {
-                est_h
-            } else if grad_v < grad_h {
-                est_v
-            } else {
+            // Near-equal gradients count as a tie (the tolerance makes the decision independent of
+            // floating-point evaluation order, so the GPU makes the same choice).
+            let tie = (grad_h - grad_v).abs() <= HA_TIE_ABS + HA_TIE_REL * (grad_h + grad_v);
+            let est = if tie {
                 (est_h + est_v) / 2.0
+            } else if grad_h < grad_v {
+                est_h
+            } else {
+                est_v
             };
             // Limit Laplacian overshoot to the range of the four neighbouring greens.
             let lo = gl.min(gr).min(gu).min(gd);

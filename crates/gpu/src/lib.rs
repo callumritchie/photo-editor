@@ -262,8 +262,20 @@ const ENTRY_POINTS: [&str; 16] = [
     "geometry_pass",
 ];
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DemosaicUniform {
+    w: u32,
+    h: u32,
+    cfa_w: u32,
+    cfa_h: u32,
+    pattern: [u32; 36],
+}
+
 /// A GPU device with the develop pipelines compiled.
 pub struct Gpu {
+    demosaic_layout: wgpu::BindGroupLayout,
+    demosaic_pipelines: Vec<wgpu::ComputePipeline>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
@@ -428,7 +440,43 @@ impl Gpu {
                 })
             })
             .collect();
+        // Demosaic pipelines (their own bindings: uniform, mosaic, green, rgb, diff).
+        let dmodule = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("demosaic"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("demosaic.wgsl").into()),
+        });
+        let dentries = [
+            buffer(0, uniform, false),
+            buffer(1, storage(true), false),
+            buffer(2, storage(false), false),
+            buffer(3, storage(false), false),
+            buffer(4, storage(false), false),
+        ];
+        let demosaic_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("demosaic"),
+            entries: &dentries,
+        });
+        let dpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("demosaic"),
+            bind_group_layouts: &[Some(&demosaic_layout)],
+            immediate_size: 0,
+        });
+        let demosaic_pipelines = ["green_pass", "colour_pass", "median_pass"]
+            .iter()
+            .map(|ep| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(ep),
+                    layout: Some(&dpl),
+                    module: &dmodule,
+                    entry_point: Some(ep),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            })
+            .collect();
         Some(Gpu {
+            demosaic_layout,
+            demosaic_pipelines,
             device,
             queue,
             layout,
@@ -460,6 +508,101 @@ impl Gpu {
             label: Some("develop"),
             layout: &self.layout,
             entries: &entries,
+        })
+    }
+
+    /// Demosaic a mosaic frame (as `pe_pipeline::demosaic::high_quality`) into a linear-RGB frame.
+    pub fn demosaic(&self, frame: &RawFrame) -> Result<RawFrame, GpuError> {
+        let Layout::Mosaic(cfa) = &frame.layout else {
+            return Ok(frame.clone());
+        };
+        if cfa.width * cfa.height > 36 {
+            return Err(GpuError::NotLinear);
+        }
+        let (w, h) = (frame.width as u32, frame.height as u32);
+        let n = (w * h) as u64;
+        if n * 12 > self.device.limits().max_storage_buffer_binding_size {
+            return Err(GpuError::TooLarge(n * 12));
+        }
+        let mut pattern = [0u32; 36];
+        for (k, c) in cfa.colors.iter().enumerate() {
+            pattern[k] = *c as u32;
+        }
+        let u = DemosaicUniform {
+            w,
+            h,
+            cfa_w: cfa.width as u32,
+            cfa_h: cfa.height as u32,
+            pattern,
+        };
+        use wgpu::BufferUsages as U;
+        let d = &self.device;
+        let init = |label: &str, bytes: &[u8], usage| {
+            d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytes,
+                usage,
+            })
+        };
+        let buf = |label: &str, size: u64, usage| {
+            d.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let ubuf = init("demosaic params", bytemuck::bytes_of(&u), U::UNIFORM);
+        let mosaic = init("mosaic", bytemuck::cast_slice(&frame.data), U::STORAGE);
+        let green = buf("green", n * 4, U::STORAGE);
+        let rgb = buf("rgb", n * 12, U::STORAGE | U::COPY_SRC);
+        let diff = buf("diff", n * 8, U::STORAGE);
+        let readback = buf("rgb readback", n * 12, U::MAP_READ | U::COPY_DST);
+        let bg = d.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("demosaic"),
+            layout: &self.demosaic_layout,
+            entries: &[&ubuf, &mosaic, &green, &rgb, &diff]
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect::<Vec<_>>(),
+        });
+        let mut enc = d.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_bind_group(0, &bg, &[]);
+            let (gx, gy) = workgroups(w * h);
+            for p in &self.demosaic_pipelines {
+                pass.set_pipeline(p);
+                pass.dispatch_workgroups(gx, gy, 1);
+            }
+        }
+        enc.copy_buffer_to_buffer(&rgb, 0, &readback, 0, n * 12);
+        self.queue.submit([enc.finish()]);
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        d.poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| GpuError::Readback(e.to_string()))?;
+        rx.recv()
+            .map_err(|e| GpuError::Readback(e.to_string()))?
+            .map_err(|e| GpuError::Readback(e.to_string()))?;
+        let data: Vec<f32> = bytemuck::cast_slice(
+            &slice
+                .get_mapped_range()
+                .map_err(|e| GpuError::Readback(e.to_string()))?,
+        )
+        .to_vec();
+        readback.unmap();
+        Ok(RawFrame {
+            layout: Layout::LinearRgb,
+            data,
+            ..frame.clone_header()
         })
     }
 
