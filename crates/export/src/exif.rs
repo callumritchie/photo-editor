@@ -17,6 +17,8 @@ pub struct PhotoMeta {
     pub exposure_time: Option<f64>,
     pub f_number: Option<f64>,
     pub focal_length: Option<f64>,
+    /// Keywords to embed (already expanded, e.g. with [`crate::xmp::expand_paths`]).
+    pub keywords: Vec<String>,
 }
 
 /// Which metadata to embed.
@@ -208,6 +210,7 @@ mod tests {
             exposure_time: Some(1.0 / 250.0),
             f_number: Some(2.8),
             focal_length: Some(50.0),
+            keywords: Vec::new(),
         }
     }
 

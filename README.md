@@ -76,7 +76,8 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   (1 GB budget, least recently used dropped first); deleting that file is safe.
 - **Export** (⇧⌘E) the selected photos: JPEG, PNG or TIFF (8 or 16-bit) or the original file; sRGB, Display P3, Adobe RGB
   or ProPhoto with an embedded ICC profile; resize by long/short edge, width, height, fit, megapixels or percentage; output
-  sharpening for screen, matte or glossy paper; metadata (all, copyright only, or none); file names from tokens such as
+  sharpening for screen, matte or glossy paper; metadata (all, copyright only, or none; "all" includes keywords, with
+  their parent levels, as standard XMP that Finder/Spotlight and other apps read); file names from tokens such as
   `{date}_{seq:3}`. Settings can be saved as export presets. Rendering happens in the background; when it finishes,
   *Show in Finder* reveals the files.
 

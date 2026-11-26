@@ -40,9 +40,17 @@ impl Catalog {
                         exposure_time: r.get(6)?,
                         f_number: r.get(7)?,
                         focal_length: r.get(8)?,
+                        keywords: Vec::new(),
                     })
                 },
             )?;
+            let mut meta = meta;
+            let paths: Vec<String> = self
+                .keywords_of(&[id])?
+                .into_iter()
+                .map(|k| k.path)
+                .collect();
+            meta.keywords = pe_export::xmp::expand_paths(&paths);
             out.push(ExportItem {
                 source: PathBuf::from(img.path),
                 settings: self.render_settings(id)?,

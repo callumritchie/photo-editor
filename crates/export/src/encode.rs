@@ -28,7 +28,12 @@ fn to_u16(e: &Encoded) -> Vec<u16> {
 }
 
 /// Insert APP1 (EXIF) and APP2 (ICC) segments right after the JPEG SOI marker.
-fn jpeg_insert_segments(jpeg: Vec<u8>, icc: &[u8], exif: Option<&[u8]>) -> Vec<u8> {
+fn jpeg_insert_segments(
+    jpeg: Vec<u8>,
+    icc: &[u8],
+    exif: Option<&[u8]>,
+    xmp: Option<&str>,
+) -> Vec<u8> {
     let mut segs = Vec::new();
     if let Some(ex) = exif {
         let len = 2 + 6 + ex.len();
@@ -37,6 +42,15 @@ fn jpeg_insert_segments(jpeg: Vec<u8>, icc: &[u8], exif: Option<&[u8]>) -> Vec<u
             segs.extend((len as u16).to_be_bytes());
             segs.extend(b"Exif\0\0");
             segs.extend(ex);
+        }
+    }
+    if let Some(x) = xmp {
+        let len = 2 + crate::xmp::JPEG_XMP_HEADER.len() + x.len();
+        if len <= 0xFFFF {
+            segs.extend([0xFF, 0xE1]);
+            segs.extend((len as u16).to_be_bytes());
+            segs.extend(crate::xmp::JPEG_XMP_HEADER);
+            segs.extend(x.as_bytes());
         }
     }
     // ICC may span several APP2 chunks of at most 65519 bytes of profile data each.
@@ -62,13 +76,14 @@ pub fn jpeg(
     quality: u8,
     icc: &[u8],
     exif: Option<&[u8]>,
+    xmp: Option<&str>,
 ) -> Result<Vec<u8>, ExportError> {
     let img: ImageBuffer<Rgb<u8>, _> = ImageBuffer::from_raw(e.width, e.height, to_u8(e))
         .ok_or(ExportError::Internal("buffer size"))?;
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100))
         .encode_image(&img)?;
-    Ok(jpeg_insert_segments(out, icc, exif))
+    Ok(jpeg_insert_segments(out, icc, exif, xmp))
 }
 
 /// CRC-32 (ISO 3309 / PNG) of `bytes`.
@@ -103,6 +118,7 @@ pub fn png(
     sixteen_bit: bool,
     icc: &[u8],
     exif: Option<&[u8]>,
+    xmp: Option<&str>,
 ) -> Result<Vec<u8>, ExportError> {
     let img = if sixteen_bit {
         DynamicImage::ImageRgb16(
@@ -123,6 +139,13 @@ pub fn png(
     let mut extra = png_chunk(b"iCCP", &iccp);
     if let Some(ex) = exif {
         extra.extend(png_chunk(b"eXIf", ex));
+    }
+    if let Some(x) = xmp {
+        // iTXt: keyword, NUL, compression flag 0, method 0, empty language tag and translated keyword.
+        let mut body = crate::xmp::PNG_XMP_KEYWORD.as_bytes().to_vec();
+        body.extend([0, 0, 0, 0, 0]);
+        body.extend(x.as_bytes());
+        extra.extend(png_chunk(b"iTXt", &body));
     }
     let mut out = Vec::with_capacity(raw.len() + extra.len());
     out.extend(&raw[..33]);
@@ -147,6 +170,7 @@ pub struct TiffTags<'a> {
     pub artist: Option<&'a str>,
     pub copyright: Option<&'a str>,
     pub ppi: u32,
+    pub xmp: Option<&'a str>,
 }
 
 pub fn tiff(
@@ -193,6 +217,9 @@ pub fn tiff(
             if let Some(v) = tags.copyright {
                 d.write_tag(Tag::Copyright, v)?;
             }
+            if let Some(x) = tags.xmp {
+                d.write_tag(Tag::Unknown(700), x.as_bytes())?;
+            }
             img.write_data($data)?;
         }};
     }
@@ -224,9 +251,9 @@ mod tests {
         };
         let icc = pe_colour::icc::profile(pe_colour::ColorSpace::DisplayP3);
         for bytes in [
-            jpeg(&e, 90, &icc, Some(b"II*\0\x08\0\0\0\0\0\0\0\0\0")).unwrap(),
-            png(&e, false, &icc, None).unwrap(),
-            png(&e, true, &icc, None).unwrap(),
+            jpeg(&e, 90, &icc, Some(b"II*\0\x08\0\0\0\0\0\0\0\0\0"), None).unwrap(),
+            png(&e, false, &icc, None, Some("<x/>")).unwrap(),
+            png(&e, true, &icc, None, None).unwrap(),
         ] {
             let img = image::load_from_memory(&bytes).unwrap();
             assert_eq!((img.width(), img.height()), (8, 6));
@@ -243,6 +270,7 @@ mod tests {
                 artist: None,
                 copyright: None,
                 ppi: 300,
+                xmp: None,
             },
         )
         .unwrap();

@@ -52,3 +52,60 @@ fn export_from_catalog_and_presets() {
     cat.delete_export_preset(p.id).unwrap();
     assert!(cat.export_presets().unwrap().is_empty());
 }
+
+#[test]
+fn keywords_are_embedded_as_xmp_in_every_format() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("p");
+    std::fs::create_dir_all(&src).unwrap();
+    image::RgbImage::from_pixel(64, 48, image::Rgb([90, 120, 160]))
+        .save(src.join("a.jpg"))
+        .unwrap();
+    let mut cat = Catalog::create(&t.path().join("lib.pecat")).unwrap();
+    cat.import(&[src], &ImportOptions::default(), &mut |_| {})
+        .unwrap();
+    let id = cat.images(&Query::default()).unwrap()[0].id;
+    cat.add_keywords(&[id], &["Animals > Birds".into(), "R&D".into()])
+        .unwrap();
+    for (format, ext) in [
+        (Format::Jpeg { quality: 90 }, "jpg"),
+        (Format::Png { sixteen_bit: false }, "png"),
+        (
+            Format::Tiff {
+                sixteen_bit: false,
+                compression: pe_export::TiffCompression::Lzw,
+            },
+            "tif",
+        ),
+    ] {
+        let out = t.path().join(ext);
+        let s = ExportSettings {
+            destination: out,
+            format,
+            artist: Some("Ann".into()),
+            ..Default::default()
+        };
+        let r = cat.export(&[id], &s, &mut |_| {}).unwrap();
+        let bytes = std::fs::read(&r.written[0]).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        for k in [
+            "<rdf:li>Animals</rdf:li>",
+            "<rdf:li>Birds</rdf:li>",
+            "<rdf:li>R&amp;D</rdf:li>",
+            "<rdf:li>Ann</rdf:li>",
+        ] {
+            assert!(text.contains(k), "{ext}: {k} missing");
+        }
+        // Still a valid image.
+        assert!(image::load_from_memory(&bytes).is_ok() || ext == "tif");
+        let none = ExportSettings {
+            metadata: pe_export::MetadataMode::None,
+            destination: t.path().join(format!("{ext}-none")),
+            ..s
+        };
+        let r = cat.export(&[id], &none, &mut |_| {}).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(&r.written[0]).unwrap()).contains("dc:subject")
+        );
+    }
+}

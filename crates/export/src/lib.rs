@@ -6,6 +6,7 @@ pub mod encode;
 pub mod exif;
 pub mod naming;
 pub mod process;
+pub mod xmp;
 
 use std::path::{Path, PathBuf};
 
@@ -191,10 +192,19 @@ pub fn render_file(
         s.ppi,
         s.color_space == ColorSpace::Srgb,
     );
+    let xmp = xmp::build(
+        &item.meta.keywords,
+        s.metadata,
+        s.artist.as_deref(),
+        s.copyright.as_deref(),
+    );
     Ok(match s.format {
-        Format::Jpeg { quality } => (encode::jpeg(&enc, quality, &icc, exif.as_deref())?, "jpg"),
+        Format::Jpeg { quality } => (
+            encode::jpeg(&enc, quality, &icc, exif.as_deref(), xmp.as_deref())?,
+            "jpg",
+        ),
         Format::Png { sixteen_bit } => (
-            encode::png(&enc, sixteen_bit, &icc, exif.as_deref())?,
+            encode::png(&enc, sixteen_bit, &icc, exif.as_deref(), xmp.as_deref())?,
             "png",
         ),
         Format::Tiff {
@@ -215,6 +225,7 @@ pub fn render_file(
                 artist: s.artist.as_deref().filter(|_| !none),
                 copyright: s.copyright.as_deref().filter(|_| !none),
                 ppi: s.ppi,
+                xmp: xmp.as_deref(),
             };
             (
                 encode::tiff(&enc, sixteen_bit, compression, &icc, &tags)?,
