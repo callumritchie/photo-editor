@@ -397,11 +397,22 @@ struct LoupeImage: View {
         ZStack(alignment: .bottom) {
             Color.black.opacity(0.92)
             Group {
-                if let image = model.image ?? fallback {
+                if model.zoomed && !model.cropping && !model.maskEditing && model.image != nil {
+                    ZoomView(model: model).padding(.bottom, 36)
+                } else if let image = model.image ?? fallback {
                     Image(nsImage: image).resizable().scaledToFit()
                         .overlay {
                             if model.maskEditing && !model.cropping && model.image != nil {
                                 MaskCanvas(model: model)
+                            }
+                            if !model.maskEditing && !model.cropping && model.image != nil {
+                                // Click to zoom to 1:1 at that point.
+                                GeometryReader { g in
+                                    Color.clear.contentShape(Rectangle())
+                                        .onTapGesture { p in
+                                            model.setZoom(true, at: CGPoint(x: p.x / g.size.width, y: p.y / g.size.height))
+                                        }
+                                }
                             }
                             if model.cropping && model.image != nil {
                                 CropOverlay(
@@ -424,6 +435,7 @@ struct LoupeImage: View {
                     .lineLimit(1).truncationMode(.tail).foregroundStyle(.white.opacity(0.85))
                 Spacer(minLength: 8)
                 Text(String(repeating: "★", count: currentRating)).foregroundStyle(.yellow)
+                if model.zoomed { Text("1:1").font(.caption.bold()).foregroundStyle(.yellow) }
                 if let ms = model.lastRenderMs {
                     Text("\(ms) ms · \(Core.rendererName == "CPU" ? "CPU" : "GPU")")
                         .font(.caption).foregroundStyle(.secondary)
@@ -441,7 +453,8 @@ struct LoupeImage: View {
         .focusEffectDisabled()
         .onAppear { focused = true }
         .onKeyPress(.escape) {
-            if model.cropping { model.cropping = false }
+            if model.zoomed { model.setZoom(false) }
+            else if model.cropping { model.cropping = false }
             else if model.maskEditing { model.selectedMask = nil; model.pickingColor = false }
             else { state.mode = .grid }
             return .handled
@@ -451,10 +464,10 @@ struct LoupeImage: View {
             return .ignored
         }
         .onKeyPress("r") { model.cropping.toggle(); return .handled }
+        .onKeyPress("z") { model.setZoom(!model.zoomed); return .handled }
         .onKeyPress(.leftArrow) { state.move(by: -1); return .handled }
         .onKeyPress(.rightArrow) { state.move(by: 1); return .handled }
         .onKeyPress { press in state.handleKey(press.characters) ? .handled : .ignored }
-        .onTapGesture(count: 2) { state.mode = .grid }
         .task(id: item.id) {
             fallback = nil
             if let cached = await state.cachedPreview(item.id) { fallback = cached }

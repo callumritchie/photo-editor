@@ -69,6 +69,11 @@ uint8_t *pe_image_select_sky(PeImage *img, uint32_t *w, uint32_t *hh);
 uint8_t *pe_image_mask_overlay(PeImage *img, const char *settings_json, uint32_t index, uint32_t *w, uint32_t *hh);
 bool pe_image_pick_color(PeImage *img, const char *settings_json, float fx, float fy, float *out_lab);
 
+/* 1:1 viewing: full-resolution output size, and a rectangle of it rendered at 1:1 (RGBA8). */
+bool pe_image_output_size(PeImage *img, const char *settings_json, uint32_t *w, uint32_t *hh);
+uint8_t *pe_image_render_region(PeImage *img, const char *settings_json, uint32_t x, uint32_t y, uint32_t rw,
+                                uint32_t rh, uint32_t *w, uint32_t *hh);
+
 /* "Apple M1 (Metal)" or "CPU": the renderer used by pe_image_render. */
 char *pe_renderer_name(void);
 

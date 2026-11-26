@@ -56,6 +56,8 @@ open --env PE_CATALOG=/path/Test.pecat app/build/PhotoEditor.app   # use another
   in about 5–15 ms; without a GPU the CPU takes 25–55 ms. Each release records one history step. ⌘Z/⇧⌘Z undo and redo; click any history step to return to it.
   You can also create snapshots, save and apply presets (choosing which groups to include), and copy, paste or sync settings to
   selected photos (⇧⌘C / ⇧⌘V). Edits are stored in the library, never in your files. Grid thumbnails update to show edits.
+  Click the photo (or press `Z`) to view it at 1:1 there; drag to pan, click or `Esc` to go back. The 1:1 view renders
+  only the visible part, at full resolution on the GPU (demosaic included), and matches the exported file.
   `Esc` returns to the grid.
 - **Masks** (Masks section of the editing panel): linear and radial gradients with on-photo handles, brush (paint, `⌥`
   to erase), luminance and colour ranges (pick colours on the photo), Select Subject (Apple's on-device Vision framework)

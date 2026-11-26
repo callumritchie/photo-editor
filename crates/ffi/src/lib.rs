@@ -582,7 +582,18 @@ pub unsafe extern "C" fn pe_catalog_delete_preset(h: *mut PeCatalog, id: i64) ->
 // Interactive preview image
 
 /// A raw file decoded once and reduced for fast re-rendering while editing.
+/// A region prepared for 1:1 rendering: its sensor rectangle, demosaiced pixels and GPU upload.
+struct RegionCache {
+    rect: [usize; 4],
+    demosaic: pe_pipeline::Demosaic,
+    rgb: pe_raw::RawFrame,
+    gpu: Option<pe_gpu::GpuFrame>,
+}
+
 pub struct PeImage {
+    /// The whole decoded frame, for 1:1 regions.
+    full: pe_raw::RawFrame,
+    region: Mutex<Option<RegionCache>>,
     preview: pe_raw::RawFrame,
     as_shot: Option<(f32, f32)>,
     gpu: Option<pe_gpu::GpuFrame>,
@@ -806,6 +817,183 @@ pub unsafe extern "C" fn pe_image_pick_color(
     }
 }
 
+/// Size of the full-resolution output (after crop and geometry) for `settings_json`.
+#[no_mangle]
+pub unsafe extern "C" fn pe_image_output_size(
+    img: *mut PeImage,
+    settings_json: *const c_char,
+    w: *mut u32,
+    hh: *mut u32,
+) -> bool {
+    let Some(img) = img.as_ref() else {
+        return false;
+    };
+    let s: pe_pipeline::Settings = match str_in(settings_json)
+        .map(serde_json::from_str::<pe_pipeline::Settings>)
+        .transpose()
+    {
+        Ok(s) => s.unwrap_or_default().clamped(),
+        Err(_) => return false,
+    };
+    let g = pe_pipeline::geometry::GeometryParams::new(
+        &s,
+        img.full.width,
+        img.full.height,
+        img.full.orientation,
+    );
+    let (ow, oh) = g.output_size();
+    if !w.is_null() {
+        *w = ow as u32;
+    }
+    if !hh.is_null() {
+        *hh = oh as u32;
+    }
+    true
+}
+
+/// Render the full-resolution output rectangle (x, y, w, h) at 1:1 as RGBA8 (free with
+/// `pe_bytes_free(p, w*h*4)`). The region (plus a margin) is demosaiced and uploaded once and reused
+/// while it still covers the rectangle; whole-picture measurements come from the preview.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn pe_image_render_region(
+    img: *mut PeImage,
+    settings_json: *const c_char,
+    x: u32,
+    y: u32,
+    rw: u32,
+    rh: u32,
+    w: *mut u32,
+    hh: *mut u32,
+) -> *mut u8 {
+    let Some(img) = img.as_ref() else {
+        return ptr::null_mut();
+    };
+    let mut s: pe_pipeline::Settings =
+        match str_in(settings_json).map(serde_json::from_str).transpose() {
+            Ok(s) => s.unwrap_or_default(),
+            Err(_) => return ptr::null_mut(),
+        };
+    s.rasters = img.rasters.lock().unwrap().clone();
+    let frame = &img.full;
+    let out = [
+        x as usize,
+        y as usize,
+        rw.max(1) as usize,
+        rh.max(1) as usize,
+    ];
+    let (rect, region) = pe_pipeline::region::plan_region(frame, &s, out);
+    let demosaic = s.demosaic;
+    let mut cache = img.region.lock().unwrap();
+    // Reuse the prepared region when it covers the new one (same demosaic method).
+    let covers = cache.as_ref().is_some_and(|c| {
+        c.demosaic == demosaic
+            && c.rect[0] <= rect[0]
+            && c.rect[1] <= rect[1]
+            && c.rect[0] + c.rect[2] >= rect[0] + rect[2]
+            && c.rect[1] + c.rect[3] >= rect[1] + rect[3]
+    });
+    if !covers {
+        // Prepare a little more than needed, so small pans reuse it.
+        let grow = 256usize;
+        let a = pe_pipeline::region::alignment(
+            frame.width,
+            frame.height,
+            match &frame.layout {
+                pe_raw::Layout::Mosaic(c) => c.width.max(c.height),
+                _ => 1,
+            },
+        );
+        let gx0 = rect[0].saturating_sub(grow) / a * a;
+        let gy0 = rect[1].saturating_sub(grow) / a * a;
+        let gx1 = (rect[0] + rect[2] + grow).min(frame.width);
+        let gy1 = (rect[1] + rect[3] + grow).min(frame.height);
+        let big = [gx0, gy0, gx1 - gx0, gy1 - gy0];
+        let crop = pe_pipeline::region::crop_frame(frame, big[0], big[1], big[2], big[3]);
+        let rgb = match (gpu(), demosaic) {
+            (Some(g), pe_pipeline::Demosaic::Auto) => g.demosaic(&crop).ok(),
+            _ => None,
+        }
+        .unwrap_or_else(|| pe_raw::RawFrame {
+            layout: pe_raw::Layout::LinearRgb,
+            data: pe_pipeline::camera_rgb(&crop, &s),
+            ..crop.clone_header()
+        });
+        let ctx = pe_pipeline::region::Ctx {
+            full_w: frame.width,
+            full_h: frame.height,
+            x0: big[0],
+            y0: big[1],
+        };
+        let up = gpu().and_then(|g| g.upload_region(&rgb, ctx).ok());
+        *cache = Some(RegionCache {
+            rect: big,
+            demosaic,
+            rgb,
+            gpu: up,
+        });
+    }
+    let c = cache.as_ref().expect("prepared");
+    // Whole-picture measurements that do not depend on scale, from the preview.
+    let auto_wb = pe_pipeline::wb::multipliers(
+        &img.preview,
+        &pe_pipeline::WhiteBalance::Auto,
+        &img.preview.data,
+    );
+    let airlight = (s.dehaze != 0.0)
+        .then(|| {
+            let sc = pe_pipeline::render_scene(&img.preview, &s.clone().clamped()).ok()?;
+            Some(pe_pipeline::local::airlight(
+                &pe_pipeline::local::airlight_samples(&sc.data, sc.width, sc.height),
+            ))
+        })
+        .flatten();
+    let globals = pe_pipeline::region::Globals {
+        auto_wb: Some(auto_wb),
+        airlight,
+        noise: None,
+    };
+    let region = pe_pipeline::region::Region {
+        x0: c.rect[0],
+        y0: c.rect[1],
+        ..region
+    };
+    let rgba = match (gpu(), &c.gpu) {
+        (Some(g), Some(f)) => g
+            .render_region(f, &s, out, &globals)
+            .ok()
+            .map(|(_, _, p)| p),
+        _ => None,
+    }
+    .or_else(|| {
+        let out_img = pe_pipeline::render_region(&c.rgb, &s, &region, &globals).ok()?;
+        Some(
+            out_img
+                .data
+                .chunks(3)
+                .flat_map(|p| {
+                    [
+                        (p[0] * 255.0 + 0.5) as u8,
+                        (p[1] * 255.0 + 0.5) as u8,
+                        (p[2] * 255.0 + 0.5) as u8,
+                        255,
+                    ]
+                })
+                .collect(),
+        )
+    });
+    let Some(rgba) = rgba else {
+        return ptr::null_mut();
+    };
+    if !w.is_null() {
+        *w = out[2] as u32;
+    }
+    if !hh.is_null() {
+        *hh = out[3] as u32;
+    }
+    bytes_out(rgba, ptr::null_mut())
+}
+
 /// Select Sky on the preview (default rendering, oriented, uncropped). Returns an 8-bit grey raster
 /// (free with `pe_bytes_free(p, w*h)`), or NULL.
 #[no_mangle]
@@ -894,6 +1082,8 @@ pub unsafe extern "C" fn pe_image_open(path: *const c_char, long_edge: u32) -> *
     let preview = pe_pipeline::prepare_preview(&frame, long_edge as usize);
     let gpu = gpu().and_then(|g| g.upload(&preview).ok());
     Box::into_raw(Box::new(PeImage {
+        full: frame,
+        region: Mutex::new(None),
         preview,
         as_shot,
         gpu,
@@ -1156,6 +1346,68 @@ mod tests {
                 (Some(2), Some(2))
             );
             pe_catalog_close(h);
+        }
+    }
+
+    #[test]
+    fn one_to_one_regions() {
+        let raw = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/raw/Nikon-D750.nef");
+        if !raw.exists() {
+            return;
+        }
+        unsafe {
+            let p = CString::new(raw.to_str().unwrap()).unwrap();
+            let img = pe_image_open(p.as_ptr(), 1024);
+            let s = CString::new(r#"{"exposure": 0.5, "shadows": 40}"#).unwrap();
+            let (mut w, mut h) = (0u32, 0u32);
+            assert!(pe_image_output_size(img, s.as_ptr(), &mut w, &mut h));
+            assert_eq!((w, h), (6016, 4016));
+            let t = std::time::Instant::now();
+            let (mut rw, mut rh) = (0u32, 0u32);
+            let px =
+                pe_image_render_region(img, s.as_ptr(), 2000, 1500, 1200, 800, &mut rw, &mut rh);
+            let first = t.elapsed();
+            assert!(!px.is_null() && (rw, rh) == (1200, 800));
+            let region: Vec<u8> = std::slice::from_raw_parts(px, (rw * rh * 4) as usize).to_vec();
+            pe_bytes_free(px, (rw * rh * 4) as usize);
+            // Same area with other settings, then a small pan: the prepared region is reused.
+            let s2 = CString::new(r#"{"exposure": 0.8, "shadows": 40}"#).unwrap();
+            let t = std::time::Instant::now();
+            let px =
+                pe_image_render_region(img, s2.as_ptr(), 2000, 1500, 1200, 800, &mut rw, &mut rh);
+            let again = t.elapsed();
+            pe_bytes_free(px, (rw * rh * 4) as usize);
+            let t = std::time::Instant::now();
+            let px =
+                pe_image_render_region(img, s2.as_ptr(), 2100, 1550, 1200, 800, &mut rw, &mut rh);
+            let pan = t.elapsed();
+            pe_bytes_free(px, (rw * rh * 4) as usize);
+            eprintln!("1:1 region: first {first:.0?}, re-render {again:.0?}, small pan {pan:.0?}");
+            // The region matches the same part of a full render (CPU).
+            let frame = pe_raw::decode_file(&raw).unwrap();
+            let settings: pe_pipeline::Settings =
+                serde_json::from_str(r#"{"exposure": 0.5, "shadows": 40}"#).unwrap();
+            let full = pe_pipeline::render(&frame, &settings).unwrap();
+            let mut worst = 0i32;
+            let mut sum = 0i64;
+            for y in 0..800usize {
+                for x in 0..1200usize {
+                    for c in 0..3 {
+                        let a = region[(y * 1200 + x) * 4 + c] as i32;
+                        let b = (full.data[((y + 1500) * full.width + x + 2000) * 3 + c] * 255.0
+                            + 0.5) as i32;
+                        worst = worst.max((a - b).abs());
+                        sum += (a - b).abs() as i64;
+                    }
+                }
+            }
+            let mean = sum as f64 / (1200.0 * 800.0 * 3.0);
+            eprintln!("vs full render: worst {worst} steps, mean {mean:.4}");
+            // Noise is measured per region and auto WB comes from the preview, but neither is used
+            // here; only float rounding remains.
+            assert!(worst <= 1, "worst {worst}");
+            pe_image_close(img);
         }
     }
 

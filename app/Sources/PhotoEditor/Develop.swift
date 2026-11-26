@@ -32,6 +32,43 @@ final class DevelopModel: ObservableObject {
     @Published var pickingColor = false
     @Published var busy: String?
     var maskEditing: Bool { selectedMask != nil }
+
+    // 1:1 zoom: centre in fractions of the full-resolution output; viewport in device pixels.
+    @Published var zoomed = false
+    @Published var zoomCenter = CGPoint(x: 0.5, y: 0.5)
+    @Published var zoomImage: NSImage?
+    @Published private(set) var fullSize = CGSize.zero
+    var viewport = CGSize(width: 1600, height: 1000)
+    private var zoomRendering = false
+    private var zoomPending = false
+
+    /// Render the visible 1:1 rectangle, coalescing bursts (drags, slider moves).
+    func requestZoomRender() {
+        guard zoomed, let preview else { return }
+        if zoomRendering { zoomPending = true; return }
+        zoomRendering = true
+        let s = settings
+        let vp = viewport
+        let centre = zoomCenter
+        Task {
+            let (size, img, rect) = await Task.detached(priority: .userInitiated) { () -> (CGSize, NSImage?, CGRect) in
+                let full = preview.outputSize(s)
+                let w = min(vp.width.rounded(), full.width), h = min(vp.height.rounded(), full.height)
+                let x = min(max(centre.x * full.width - w / 2, 0), full.width - w).rounded()
+                let y = min(max(centre.y * full.height - h / 2, 0), full.height - h).rounded()
+                let r = CGRect(x: x, y: y, width: w, height: h)
+                return (full, preview.renderRegion(s, r), r)
+            }.value
+            fullSize = size
+            // Keep the centre where the rectangle actually is (after clamping at the edges).
+            if size.width > 0, size.height > 0, !zoomPending {
+                zoomCenter = CGPoint(x: rect.midX / size.width, y: rect.midY / size.height)
+            }
+            if let img { zoomImage = img }
+            zoomRendering = false
+            if zoomPending { zoomPending = false; requestZoomRender() }
+        }
+    }
     @Published var error: String?
 
     private(set) var preview: PreviewImage?
@@ -86,6 +123,10 @@ final class DevelopModel: ObservableObject {
         // Development aids for UI snapshots: PE_SELECT_MASK=<index>, PE_ADD_MASK=subject|sky|radial|...
         let env = ProcessInfo.processInfo.environment
         if let i = Int(env["PE_SELECT_MASK"] ?? ""), settings.masks.indices.contains(i) { selectedMask = i }
+        // PE_START_ZOOM="x,y" (fractions of the photo): open zoomed to 1:1 there.
+        if let z = env["PE_START_ZOOM"]?.split(separator: ",").compactMap({ Double($0) }), z.count == 2 {
+            setZoom(true, at: CGPoint(x: z[0], y: z[1]))
+        }
         if let k = env["PE_ADD_MASK"], let kind = MaskKind.allCases.first(where: { $0.rawValue.lowercased().contains(k) }) {
             addMask(kind)
         }
@@ -109,6 +150,7 @@ final class DevelopModel: ObservableObject {
             lastRenderMs = Int(Date().timeIntervalSince(t0) * 1000)
             if let img { image = img }
             maskOverlay = overlay
+            if zoomed { requestZoomRender() }
             rendering = false
             if pending { pending = false; requestRender() }
         }

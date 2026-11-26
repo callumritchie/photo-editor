@@ -56,10 +56,18 @@ upsampling. `tests/parity.rs` renders four cameras under six sets of settings bo
 and 99.9th percentile < 0.5, with no channel more than one 8-bit step apart. In practice every percentile is 0.000;
 the few differing pixels come from float rounding. Without a GPU (or with `PE_NO_GPU` set) everything falls back to the CPU.
 
+## Regions (1:1 viewing)
+`region.rs` renders part of a picture so it matches the same part of a full render: radii and the guided filters'
+reduced grid come from the whole picture (region origins aligned to that grid and to the colour filter array), mask and
+lens positions use whole-frame coordinates, geometry, vignette and grain use whole-picture output coordinates, and auto
+white balance, airlight and noise level can be supplied. A margin sized by the settings surrounds the visible part.
+Tests compare regions with full renders (CPU) and GPU regions with CPU regions. In the app, auto white balance and
+airlight come from the preview and noise is measured on the region. The GPU demosaic (`crates/gpu/src/demosaic.wgsl`)
+matches the CPU demosaic to within 1.2e-7.
+
 ## Known limitations (planned)
 - A single colour matrix per camera (the daylight-like one). Dual-illuminant interpolation is still to do.
 - No baseline-exposure offset per camera, so some cameras render darker than others at exposure 0.
 - Demosaic is a solid classical method. RCD (Bayer) and Markesteijn (X-Trans) are candidates for higher detail.
 - Highlight reconstruction is per-pixel. Spatial (inpainting-style) reconstruction would recover more colour in large blown areas.
-- Demosaic runs on the CPU only, so a full-resolution render takes about 1–2.5 s for 24–36 MP. Live editing uses a reduced
-  preview, which the GPU renders in milliseconds.
+- Exports render on the CPU (about 1–4 s for 24–36 MP depending on settings); the GPU renders the preview and 1:1 regions.
