@@ -29,6 +29,7 @@ struct Params {
     geo4: vec4<u32>,      // corrected frame width, height, unused, unused
     full: vec4<u32>,      // whole sensor frame width, height; this frame's origin x, y
     outr: vec4<u32>,      // output origin x, y; whole-picture output width, height
+    offs2: vec4<u32>,     // pool offsets: masked noise-reduction target (+ sharpness gain), dehaze target
 };
 
 // Per-pass parameters for the generic kernels.
@@ -196,7 +197,7 @@ fn dehaze_input(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
     if (i >= Q.w * Q.h) { return; }
     let v = pool[Q.src + i];
     let g = v.y;
-    let p = 1.0 - P.haze2.x * v.x;
+    let p = 1.0 - Q.k.x * v.x;   // omega: global or full-strength (masked) dehaze
     pool[Q.dst + i] = vec4<f32>(g, p, g * p, g * g);
 }
 
@@ -364,6 +365,40 @@ fn sample_plane(off: u32, fx: f32, fy: f32) -> vec2<f32> {
     let top = pool[off + y0 * sw + x0].xy * (1.0 - tx) + pool[off + y0 * sw + x1].xy * tx;
     let bot = pool[off + y1 * sw + x0].xy * (1.0 - tx) + pool[off + y1 * sw + x1].xy * tx;
     return top * (1.0 - ty) + bot * ty;
+}
+
+// Masked sharpness: luminance gain (minus 1) of a full-strength unsharp mask into dst.w; src is the
+// opponent plane, aux its Gaussian blur (pe_pipeline::sharp_gain_of).
+@compute @workgroup_size(256)
+fn sharp_target(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    let o1 = pool[Q.src + i].x;
+    let b = pool[Q.aux + i].x;
+    var e = 0.0;
+    if (o1 > 1.0e-4) {
+        let s = max(2.0 * o1 - b, 0.0) / o1;
+        e = clamp(s * s - 1.0, -0.75, 3.0);
+    }
+    var v = pool[Q.dst + i];
+    v.w = e;
+    pool[Q.dst + i] = v;
+}
+
+// Masked dehaze: the scene dehazed at full strength (coefficients in aux) into dst.
+@compute @workgroup_size(256)
+fn dehaze_target(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    let w = P.dims.x;
+    if (i >= w * P.dims.y) { return; }
+    var c = pool[Q.src + i].xyz;
+    let a = P.haze.xyz;
+    let inv = 1.0 / f32(P.dims2.x);
+    let m = sample_plane(Q.aux, (f32(i % w) + 0.5) * inv, (f32(i / w) + 0.5) * inv);
+    let g = clamp(luma(c) / P.haze.w, 0.0, 2.0);
+    let t = clamp(m.x * g + m.y, 0.1, 1.0);
+    c = max((c - a) / t + a, vec3<f32>(0.0));
+    pool[Q.dst + i] = vec4<f32>(c, 0.0);
 }
 
 // Recover (or add) haze in the scene plane, then refresh log Y.
@@ -624,9 +659,9 @@ fn mask_value(base: u32, p: vec2<f32>, display: vec3<f32>) -> f32 {
     var have_lab = false;
     var lab = vec3<f32>(0.0);
     for (var k = 0u; k < n; k++) {
-        let c0 = M[base + 6u + 3u * k];
-        let c1 = M[base + 7u + 3u * k];
-        let c2 = M[base + 8u + 3u * k];
+        let c0 = M[base + 7u + 3u * k];
+        let c1 = M[base + 8u + 3u * k];
+        let c2 = M[base + 9u + 3u * k];
         var v = 0.0;
         switch u32(c0.x) {
             case 0u: {
@@ -672,6 +707,8 @@ fn mask_value(base: u32, p: vec2<f32>, display: vec3<f32>) -> f32 {
     return acc * M[base].y;
 }
 
+const LOCAL_HAZE_MAX = 0.5;
+
 // Develop one sensor-space pixel (index j at (sx, sy)) up to display-linear values after the curve.
 fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
     let px = pool[P.offs.x + j];
@@ -702,7 +739,8 @@ fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
         td = dt / (1.0 + abs(dt) / 0.35);
         d += P.local.w * td;
     }
-    if (P.local.x != 0.0 || P.local.y != 0.0 || P.local.z != 0.0 || P.local.w != 0.0) { c *= exp2(d); }
+    var lgain = 1.0;
+    if (P.local.x != 0.0 || P.local.y != 0.0 || P.local.z != 0.0 || P.local.w != 0.0) { lgain = exp2(d); c *= lgain; }
 
     // Masks: scene-linear adjustments now, saturation after the colour stage.
     var vals: array<f32, 16>;
@@ -712,13 +750,28 @@ fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
         if (M[0].y > 0.5) { display = tone(c); }
         let fp = frame_pos(sx, sy);
         for (var i = 0u; i < mcount; i++) {
-            let base = 8u + i * 30u;
+            let base = 8u + i * 31u;
             let v = mask_value(base, fp, display);
             vals[i] = v;
             if (v <= 0.0) { continue; }
             let h0 = M[base];
             let h1 = M[base + 1u];
             let h2 = M[base + 2u];
+            // Local noise reduction, dehaze, sharpness (pe_pipeline::masks apply_scene).
+            let dt = M[base + 6u];
+            if (dt.x > 0.0) {
+                let k = v * dt.x * lgain;
+                c = max(c + k * (pool[P.offs2.x + j].xyz - px.xyz), vec3<f32>(0.0));
+            }
+            if (dt.y > 0.0) {
+                let k = v * dt.y * lgain;
+                c = max(c + k * (pool[P.offs2.y + j].xyz - px.xyz), vec3<f32>(0.0));
+            } else if (dt.y < 0.0) {
+                c += v * -dt.y * LOCAL_HAZE_MAX * (P.haze.xyz - c);
+            }
+            if (dt.z != 0.0) {
+                c *= max(1.0 + v * dt.z * pool[P.offs2.x + j].w, 0.0);
+            }
             if (h0.z > 0.5) {
                 let a = vec3<f32>(dot(M[base + 3u].xyz, c), dot(M[base + 4u].xyz, c), dot(M[base + 5u].xyz, c));
                 c += v * (a - c);
@@ -739,7 +792,7 @@ fn develop_pixel(j: u32, sx: u32, sy: u32) -> vec3<f32> {
     if (mcount > 0u && M[0].z > 0.5) {
         var gain = 1.0;
         for (var i = 0u; i < mcount; i++) {
-            gain *= max(1.0 + vals[i] * M[8u + i * 30u + 2u].w, 0.0);
+            gain *= max(1.0 + vals[i] * M[8u + i * 31u + 2u].w, 0.0);
         }
         if (gain != 1.0) {
             let lab = mask_oklab(e);

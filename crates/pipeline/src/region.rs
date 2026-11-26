@@ -253,7 +253,7 @@ mod tests {
             "vignette": {"amount": -40}, "grain": {"amount": 30},
             "lens": {"vignetting": 30},
             "masks": [{"id": "m", "components": [{"shape": {"type": "radial", "cx": 0.5, "cy": 0.4, "rx": 0.3, "ry": 0.3}}],
-                       "adjust": {"exposure": 0.5, "clarity": 30}}]
+                       "adjust": {"exposure": 0.5, "clarity": 30, "noise": 60, "dehaze": 40, "sharpness": 50}}]
         }))
         .unwrap();
         check(&busy, 1, centre);

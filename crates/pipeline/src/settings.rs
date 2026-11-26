@@ -418,9 +418,12 @@ impl Settings {
                 &mut a.texture,
                 &mut a.clarity,
                 &mut a.saturation,
+                &mut a.dehaze,
+                &mut a.sharpness,
             ] {
                 *v = v.clamp(-100.0, 100.0);
             }
+            a.noise = a.noise.clamp(0.0, 100.0);
         }
         let n = &mut self.noise_reduction;
         for v in [&mut n.luminance, &mut n.detail, &mut n.color] {

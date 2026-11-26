@@ -523,7 +523,13 @@ pub fn mask_params() -> Vec<ParamSpec> {
         m("blacks", "Blacks"),
         m("texture", "Texture"),
         m("clarity", "Clarity"),
+        m("dehaze", "Dehaze"),
         m("saturation", "Saturation"),
+        m("sharpness", "Sharpness"),
+        ParamSpec {
+            min: 0.0,
+            ..m("noise", "Noise Reduction")
+        },
     ]
 }
 

@@ -57,6 +57,8 @@ struct Params {
     full: [u32; 4],
     /// Output origin and whole-picture output size.
     outr: [u32; 4],
+    /// Local-detail target planes: noise reduction / sharpness, dehaze; unused, unused.
+    offs2: [u32; 4],
 }
 
 /// Per-pass record for the generic kernels (matches `struct Pass` in the shader).
@@ -76,8 +78,8 @@ struct PassUniform {
     k: [f32; 4],
 }
 
-/// Mask buffer size in vec4 records: an 8-record header plus 30 per mask.
-const MASK_RECORDS: usize = 8 + masks::MAX_MASKS * 30;
+/// Mask buffer size in vec4 records: an 8-record header plus 31 per mask.
+const MASK_RECORDS: usize = 8 + masks::MAX_MASKS * 31;
 
 /// Pack prepared masks for the shader: records (see develop.wgsl) and raster / colour data.
 fn pack_masks(mp: &MaskParams) -> (Vec<[f32; 4]>, Vec<f32>) {
@@ -96,7 +98,7 @@ fn pack_masks(mp: &MaskParams) -> (Vec<[f32; 4]>, Vec<f32>) {
     }
     let mut rasters: Vec<(*const masks::Raster, u32)> = Vec::new();
     for (i, m) in mp.masks.iter().enumerate() {
-        let b = 8 + i * 30;
+        let b = 8 + i * 31;
         let a = &m.adjust;
         rec[b] = [
             m.components.len() as f32,
@@ -111,8 +113,9 @@ fn pack_masks(mp: &MaskParams) -> (Vec<[f32; 4]>, Vec<f32>) {
         for r in 0..3 {
             rec[b + 3 + r] = row4(wbm[r]);
         }
+        rec[b + 6] = [a.noise, a.dehaze, a.sharpness, 0.0];
         for (k, c) in m.components.iter().enumerate() {
-            let at = b + 6 + 3 * k;
+            let at = b + 7 + 3 * k;
             let mode = match c.mode {
                 Combine::Add => 0.0,
                 Combine::Subtract => 1.0,
@@ -241,9 +244,11 @@ enum Kernel {
     AtrousLevel,
     Display,
     Geometry,
+    SharpTarget,
+    DehazeTarget,
 }
 
-const ENTRY_POINTS: [&str; 16] = [
+const ENTRY_POINTS: [&str; 18] = [
     "scene_pass",
     "downscale",
     "min_filter",
@@ -260,6 +265,8 @@ const ENTRY_POINTS: [&str; 16] = [
     "atrous_level",
     "display_pass",
     "geometry_pass",
+    "sharp_target",
+    "dehaze_target",
 ];
 
 #[repr(C)]
@@ -294,6 +301,11 @@ struct Planes {
     /// Detail stage: opponent plane and wavelet accumulator (full size).
     a: u32,
     acc: u32,
+    /// Masked noise reduction target (rgb) with the sharpness gain in .w; masked dehaze target.
+    e1: u32,
+    e2: u32,
+    /// Full-strength dehaze coefficients (masked dehaze).
+    dz2: u32,
     sh: u32,
     cl: u32,
     dz: u32,
@@ -631,12 +643,15 @@ impl Gpu {
             tex: 2 * n,
             a: 3 * n,
             acc: 4 * n,
-            s: [5 * n, 5 * n + m, 5 * n + 2 * m],
-            sh: 5 * n + 3 * m,
-            cl: 5 * n + 4 * m,
-            dz: 5 * n + 5 * m,
+            e1: 5 * n,
+            e2: 6 * n,
+            s: [7 * n, 7 * n + m, 7 * n + 2 * m],
+            sh: 7 * n + 3 * m,
+            cl: 7 * n + 4 * m,
+            dz: 7 * n + 5 * m,
+            dz2: 7 * n + 6 * m,
         };
-        let pool_bytes = (5 * n as u64 + 6 * m as u64) * 16;
+        let pool_bytes = (7 * n as u64 + 7 * m as u64) * 16;
         if pool_bytes > self.device.limits().max_storage_buffer_binding_size {
             return Err(GpuError::TooLarge(pool_bytes));
         }
@@ -803,9 +818,11 @@ impl Gpu {
         };
         let (wu, hu) = (f.width as usize, f.height as usize);
         // Airlight from the same sampled scene pixels the CPU path uses.
-        let airlight = if let (true, Some(a)) = (s.dehaze != 0.0, globals.airlight) {
+        let mask_dehaze = s.masks.iter().any(|m| m.enabled && m.adjust.dehaze != 0.0);
+        let want_airlight = s.dehaze != 0.0 || mask_dehaze;
+        let airlight = if let (true, Some(a)) = (want_airlight, globals.airlight) {
             a
-        } else if s.dehaze != 0.0 {
+        } else if want_airlight {
             let samples: Vec<[f32; 3]> = (0..hu)
                 .step_by(local::AIRLIGHT_STRIDE)
                 .flat_map(|y| (0..wu).step_by(local::AIRLIGHT_STRIDE).map(move |x| (x, y)))
@@ -817,9 +834,10 @@ impl Gpu {
         };
         let detail_params = {
             let probe = detail::DetailParams::new(&s, [0.0; 3], f.scale);
-            let noise = if let (true, Some(n)) = (probe.nr, globals.noise) {
+            let want_noise = probe.nr || mp.needs_noise;
+            let noise = if let (true, Some(n)) = (want_noise, globals.noise) {
                 n
-            } else if probe.nr {
+            } else if want_noise {
                 // Measured without exposure and scaled by sqrt(gain), as the CPU path does.
                 let key = [
                     wbm[0].to_bits(),
@@ -850,8 +868,9 @@ impl Gpu {
             } else {
                 [0.0; 3]
             };
-            detail::DetailParams::new(&s, noise, f.scale)
+            (detail::DetailParams::new(&s, noise, f.scale), noise)
         };
+        let (detail_params, noise) = detail_params;
         let ya = (airlight[0] * pe_colour::REC2020_LUMA[0]
             + airlight[1] * pe_colour::REC2020_LUMA[1]
             + airlight[2] * pe_colour::REC2020_LUMA[2])
@@ -919,6 +938,7 @@ impl Gpu {
                 ctx.y0 as u32,
             ],
             outr: [ox, oy, full_ow, full_oh],
+            offs2: [pl.e1, pl.e2, 0, 0],
         };
         self.queue
             .write_buffer(&f.params, 0, bytemuck::bytes_of(&p));
@@ -1031,7 +1051,15 @@ impl Gpu {
             small(&mut list, Kernel::Downscale, pl.scene, s0, 0, 0, 0.0);
             small(&mut list, Kernel::MinFilter, s0, s1, pr, 0, 0.0);
             small(&mut list, Kernel::MinFilter, s1, s0, pr, 1, 0.0);
-            small(&mut list, Kernel::DehazeInput, s0, s1, 0, 0, 0.0);
+            small(
+                &mut list,
+                Kernel::DehazeInput,
+                s0,
+                s1,
+                0,
+                0,
+                s.dehaze / 100.0 * 0.95,
+            );
             box2(&mut list, s1, s2, s0, g.guide_r as u32);
             small(&mut list, Kernel::Coeffs, s0, s1, 0, 0, local::DEHAZE_EPS);
             box2(&mut list, s1, s2, pl.dz, g.guide_r as u32);
@@ -1063,6 +1091,75 @@ impl Gpu {
                 Kernel::Box,
                 rec(pl.tex_h, pl.tex, fw, fh, r, 1, 0.0),
                 fw * fh,
+            ));
+        }
+        // Targets for masked noise reduction, sharpness and dehaze, from the scene before the global
+        // local-tone gain (the final pass scales them by it), as in pe_pipeline::local_targets.
+        if mp.needs_noise {
+            let nr_settings = Settings {
+                noise_reduction: pe_pipeline::NoiseReduction {
+                    luminance: masks::LOCAL_NR_STRENGTH,
+                    color: masks::LOCAL_NR_STRENGTH,
+                    detail: 50.0,
+                },
+                sharpening: pe_pipeline::Sharpening {
+                    amount: 0.0,
+                    ..Default::default()
+                },
+                ..s.clone()
+            };
+            let dp = detail::DetailParams::new(&nr_settings, noise, f.scale);
+            let (a, t, acc) = (pl.a, pl.tex_h, pl.acc);
+            list.push(full(Kernel::ToOpponent, pl.scene, a, 0, 0, 0, [0.0; 4]));
+            let (mut cur, mut next) = (a, t);
+            for (l, th) in dp.thresholds.iter().enumerate() {
+                list.push(full(
+                    Kernel::AtrousLevel,
+                    cur,
+                    next,
+                    acc,
+                    1u32 << l,
+                    (l > 0) as u32,
+                    *th,
+                ));
+                std::mem::swap(&mut cur, &mut next);
+            }
+            list.push(full(Kernel::AddPlanes, cur, a, acc, 0, 0, [0.0; 4]));
+            list.push(full(Kernel::FromOpponent, a, pl.e1, 0, 0, 0, [0.0; 4]));
+        }
+        if mp.needs_sharpness {
+            let sigma = (1.0 / f.scale.max(1e-3)).max(0.2);
+            let sg = [sigma, 0.0, 0.0, 0.0];
+            list.push(full(Kernel::ToOpponent, pl.scene, pl.a, 0, 0, 0, [0.0; 4]));
+            list.push(full(Kernel::Gauss, pl.a, pl.tex_h, 0, 0, 0, sg));
+            list.push(full(Kernel::Gauss, pl.tex_h, pl.acc, 0, 0, 1, sg));
+            list.push(full(
+                Kernel::SharpTarget,
+                pl.a,
+                pl.e1,
+                pl.acc,
+                0,
+                0,
+                [0.0; 4],
+            ));
+        }
+        if mp.needs_dehaze {
+            let pr = g.patch_r as u32;
+            small(&mut list, Kernel::Downscale, pl.scene, s0, 0, 0, 0.0);
+            small(&mut list, Kernel::MinFilter, s0, s1, pr, 0, 0.0);
+            small(&mut list, Kernel::MinFilter, s1, s0, pr, 1, 0.0);
+            small(&mut list, Kernel::DehazeInput, s0, s1, 0, 0, 0.95);
+            box2(&mut list, s1, s2, s0, g.guide_r as u32);
+            small(&mut list, Kernel::Coeffs, s0, s1, 0, 0, local::DEHAZE_EPS);
+            box2(&mut list, s1, s2, pl.dz2, g.guide_r as u32);
+            list.push(full(
+                Kernel::DehazeTarget,
+                pl.scene,
+                pl.e2,
+                pl.dz2,
+                0,
+                0,
+                [0.0; 4],
             ));
         }
         if use_geometry {

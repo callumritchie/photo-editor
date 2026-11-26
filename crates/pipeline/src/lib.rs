@@ -197,6 +197,8 @@ struct SceneStage {
     w: usize,
     h: usize,
     ctx: region::Ctx,
+    targets: masks::LocalTargets,
+    airlight: [f32; 3],
     planes: local::LocalPlanes,
     geo: geometry::GeometryParams,
     mp: masks::MaskParams,
@@ -220,30 +222,36 @@ fn scene_stage_in(
     let scene = render_scene_in(frame, settings, ctx, globals)?;
     let (w, h) = (scene.width, scene.height);
     let mut data = scene.data;
+    let geo = geometry::GeometryParams::new(settings, ctx.full_w, ctx.full_h, frame.orientation);
+    let mp = masks::MaskParams::new(&settings.masks, &settings.rasters, geo.frame_w, geo.frame_h);
+    let mask_dehaze = settings
+        .masks
+        .iter()
+        .any(|m| m.enabled && m.adjust.dehaze != 0.0);
 
     // Dehaze's airlight is estimated on the scene before noise reduction and sharpening (the GPU host
     // computes it from the same scene pixels).
-    let airlight = (settings.dehaze != 0.0).then(|| {
+    let airlight = (settings.dehaze != 0.0 || mask_dehaze).then(|| {
         globals
             .airlight
             .unwrap_or_else(|| local::airlight(&local::airlight_samples(&data, w, h)))
     });
     let dp = detail::DetailParams::new(settings, [0.0; 3], frame.scale);
+    let noise = if let (true, Some(n)) = (dp.nr || mp.needs_noise, globals.noise) {
+        n
+    } else if dp.nr || mp.needs_noise {
+        // Measured without exposure (so exposure changes need no new measurement) and scaled:
+        // noise of sqrt(g x) is sqrt(g) times that of sqrt(x).
+        let g = settings.exposure.exp2();
+        let n = detail::noise_sigma(w, h, |x, y| {
+            let i = (y * w + x) * 3;
+            [data[i] / g, data[i + 1] / g, data[i + 2] / g]
+        });
+        n.map(|v| v * g.sqrt())
+    } else {
+        [0.0; 3]
+    };
     if dp.enabled() {
-        let noise = if let (true, Some(n)) = (dp.nr, globals.noise) {
-            n
-        } else if dp.nr {
-            // Measured without exposure (so exposure changes need no new measurement) and scaled:
-            // noise of sqrt(g x) is sqrt(g) times that of sqrt(x).
-            let g = settings.exposure.exp2();
-            let n = detail::noise_sigma(w, h, |x, y| {
-                let i = (y * w + x) * 3;
-                [data[i] / g, data[i + 1] / g, data[i + 2] / g]
-            });
-            n.map(|v| v * g.sqrt())
-        } else {
-            [0.0; 3]
-        };
         detail::apply(
             &mut data,
             w,
@@ -252,11 +260,9 @@ fn scene_stage_in(
         );
     }
     let full = (ctx.full_w, ctx.full_h);
-    if let Some(a) = airlight {
+    if let (Some(a), true) = (airlight, settings.dehaze != 0.0) {
         local::dehaze_in(&mut data, w, h, settings.dehaze, a, full);
     }
-    let geo = geometry::GeometryParams::new(settings, ctx.full_w, ctx.full_h, frame.orientation);
-    let mp = masks::MaskParams::new(&settings.masks, &settings.rasters, geo.frame_w, geo.frame_h);
     let planes = local::local_planes_in(
         &data,
         w,
@@ -264,6 +270,17 @@ fn scene_stage_in(
         settings,
         mp.needs_clarity,
         mp.needs_texture,
+        full,
+    );
+    let targets = local_targets(
+        &data,
+        w,
+        h,
+        settings,
+        &mp,
+        noise,
+        airlight.unwrap_or([1.0; 3]),
+        frame.scale,
         full,
     );
     if let Some(gains) = &planes.gains {
@@ -284,7 +301,84 @@ fn scene_stage_in(
         planes,
         geo,
         mp,
+        targets,
+        airlight: airlight.unwrap_or([1.0; 3]),
     })
+}
+
+/// Targets for masked noise reduction, dehaze and sharpness, from the scene before the global
+/// local-tone gain (see [`masks::LocalTargets`]).
+#[allow(clippy::too_many_arguments)]
+fn local_targets(
+    base: &[f32],
+    w: usize,
+    h: usize,
+    settings: &Settings,
+    mp: &masks::MaskParams,
+    noise: [f32; 3],
+    airlight: [f32; 3],
+    scale: f32,
+    full: (usize, usize),
+) -> masks::LocalTargets {
+    let delta = |c: Vec<f32>| -> Vec<f32> { c.iter().zip(base).map(|(a, b)| a - b).collect() };
+    let nr_delta = mp.needs_noise.then(|| {
+        let s = Settings {
+            noise_reduction: NoiseReduction {
+                luminance: masks::LOCAL_NR_STRENGTH,
+                color: masks::LOCAL_NR_STRENGTH,
+                detail: 50.0,
+            },
+            sharpening: Sharpening {
+                amount: 0.0,
+                ..Default::default()
+            },
+            ..settings.clone()
+        };
+        let mut c = base.to_vec();
+        detail::apply(&mut c, w, h, &detail::DetailParams::new(&s, noise, scale));
+        delta(c)
+    });
+    let dehaze_delta = mp.needs_dehaze.then(|| {
+        let mut c = base.to_vec();
+        local::dehaze_in(&mut c, w, h, 100.0, airlight, full);
+        delta(c)
+    });
+    let sharp_gain = mp.needs_sharpness.then(|| {
+        let o: detail::Plane4 = base
+            .par_chunks(3)
+            .map(|p| {
+                let v = detail::to_opponent([p[0], p[1], p[2]]);
+                [v[0], 0.0, 0.0, 0.0]
+            })
+            .collect();
+        let sigma = (1.0 / scale.max(1e-3)).max(0.2);
+        let b = detail::gauss_pass(
+            &detail::gauss_pass(&o, w, h, sigma, false),
+            w,
+            h,
+            sigma,
+            true,
+        );
+        o.par_iter()
+            .zip(b.par_iter())
+            .map(|(l, bl)| sharp_gain_of(l[0], bl[0]))
+            .collect()
+    });
+    masks::LocalTargets {
+        nr_delta,
+        dehaze_delta,
+        sharp_gain,
+    }
+}
+
+/// Luminance gain (minus 1) of a full-strength unsharp mask: O1 is square-root luminance.
+#[inline]
+pub fn sharp_gain_of(o1: f32, blurred: f32) -> f32 {
+    if o1 <= 1e-4 {
+        return 0.0;
+    }
+    let s = (2.0 * o1 - blurred).max(0.0) / o1;
+    (s * s - 1.0).clamp(-0.75, 3.0)
 }
 
 /// One mask's values over the output picture (after crop and geometry), for showing it as an overlay:
@@ -450,6 +544,8 @@ fn render_display_in(
         planes,
         geo,
         mp,
+        targets,
+        airlight,
     } = scene_stage_in(frame, &settings, &ctx, globals)?;
     let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks);
     let look_params = look::LookParams::new(&settings);
@@ -475,12 +571,21 @@ fn render_display_in(
                     ctx.full_h,
                     geo.orientation,
                 );
+                let three = |p: &Option<Vec<f32>>| {
+                    p.as_ref()
+                        .map_or([0.0; 3], |v| [v[i * 3], v[i * 3 + 1], v[i * 3 + 2]])
+                };
                 let at = masks::PixelContext {
                     x: fx,
                     y: fy,
                     display,
                     clarity: cd,
                     texture: td,
+                    nr_delta: three(&targets.nr_delta),
+                    dehaze_delta: three(&targets.dehaze_delta),
+                    sharp_gain: targets.sharp_gain.as_ref().map_or(0.0, |v| v[i]),
+                    gain: planes.gains.as_ref().map_or(1.0, |g| g[i]),
+                    airlight,
                 };
                 c = mp.apply_scene(c, &at, &mut values, REC2020_LUMA);
             }

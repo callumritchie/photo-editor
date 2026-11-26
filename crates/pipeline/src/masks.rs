@@ -149,7 +149,13 @@ pub struct LocalAdjust {
     pub blacks: f32,
     pub texture: f32,
     pub clarity: f32,
+    /// + removes haze, - adds it.
+    pub dehaze: f32,
     pub saturation: f32,
+    /// + sharpens, - softens.
+    pub sharpness: f32,
+    /// 0..100: local noise reduction.
+    pub noise: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -344,7 +350,17 @@ pub struct AdjustParams {
     pub clarity: f32,
     pub texture: f32,
     pub saturation: f32,
+    /// -1..1, -1..1, 0..1.
+    pub dehaze: f32,
+    pub sharpness: f32,
+    pub noise: f32,
 }
+
+/// Local noise reduction blends towards the picture denoised with these strengths; local dehaze
+/// towards the picture dehazed at full strength (or, when negative, towards the airlight by up to
+/// this fraction).
+pub const LOCAL_NR_STRENGTH: f32 = 70.0;
+pub const LOCAL_HAZE_MAX: f32 = 0.5;
 
 impl AdjustParams {
     pub fn new(a: &LocalAdjust) -> Self {
@@ -371,6 +387,9 @@ impl AdjustParams {
             clarity: a.clarity / 100.0 * crate::local::CLARITY_MAX,
             texture: a.texture / 100.0 * crate::local::TEXTURE_MAX,
             saturation: a.saturation / 100.0,
+            dehaze: a.dehaze / 100.0,
+            sharpness: a.sharpness / 100.0,
+            noise: (a.noise / 100.0).clamp(0.0, 1.0),
         }
     }
 
@@ -406,6 +425,41 @@ pub struct PixelContext {
     /// Clarity and texture detail terms at this pixel (0 when not computed).
     pub clarity: f32,
     pub texture: f32,
+    /// Local detail targets (see [`LocalTargets`]); zeros when not computed.
+    pub nr_delta: [f32; 3],
+    pub dehaze_delta: [f32; 3],
+    pub sharp_gain: f32,
+    /// The global local-tone gain at this pixel (deltas are relative to the picture before it).
+    pub gain: f32,
+    pub airlight: [f32; 3],
+}
+
+impl PixelContext {
+    /// A context with no detail terms, gain 1 (for tests and simple callers).
+    pub fn neutral() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            display: [0.0; 3],
+            clarity: 0.0,
+            texture: 0.0,
+            nr_delta: [0.0; 3],
+            dehaze_delta: [0.0; 3],
+            sharp_gain: 0.0,
+            gain: 1.0,
+            airlight: [1.0; 3],
+        }
+    }
+}
+
+/// Per-pixel targets for local noise reduction, dehaze and sharpness, computed from the scene before
+/// the global local-tone gain: differences to a denoised and a fully dehazed picture, and the
+/// luminance gain an unsharp mask would apply (minus 1).
+#[derive(Debug, Clone, Default)]
+pub struct LocalTargets {
+    pub nr_delta: Option<Vec<f32>>,
+    pub dehaze_delta: Option<Vec<f32>>,
+    pub sharp_gain: Option<Vec<f32>>,
 }
 
 /// Everything needed to evaluate a photo's masks.
@@ -419,6 +473,9 @@ pub struct MaskParams {
     pub needs_clarity: bool,
     pub needs_texture: bool,
     pub needs_saturation: bool,
+    pub needs_noise: bool,
+    pub needs_dehaze: bool,
+    pub needs_sharpness: bool,
     pub lms_from_rgb: Mat3,
     pub rgb_from_lms: Mat3,
 }
@@ -508,6 +565,9 @@ impl MaskParams {
             needs_clarity: any(&|m| m.adjust.clarity != 0.0),
             needs_texture: any(&|m| m.adjust.texture != 0.0),
             needs_saturation: any(&|m| m.adjust.saturation != 0.0),
+            needs_noise: any(&|m| m.adjust.noise > 0.0),
+            needs_dehaze: any(&|m| m.adjust.dehaze > 0.0),
+            needs_sharpness: any(&|m| m.adjust.sharpness != 0.0),
             masks: prepared,
             frame_w: fw,
             frame_h: fh,
@@ -605,6 +665,22 @@ impl MaskParams {
             values[i] = v;
             if v <= 0.0 {
                 continue;
+            }
+            let a = &m.adjust;
+            if a.noise > 0.0 {
+                let k = v * a.noise * at.gain;
+                c = [0, 1, 2].map(|j| (c[j] + k * at.nr_delta[j]).max(0.0));
+            }
+            if a.dehaze > 0.0 {
+                let k = v * a.dehaze * at.gain;
+                c = [0, 1, 2].map(|j| (c[j] + k * at.dehaze_delta[j]).max(0.0));
+            } else if a.dehaze < 0.0 {
+                let k = v * -a.dehaze * LOCAL_HAZE_MAX;
+                c = [0, 1, 2].map(|j| c[j] + k * (at.airlight[j] - c[j]));
+            }
+            if a.sharpness != 0.0 {
+                let k = (1.0 + v * a.sharpness * at.sharp_gain).max(0.0);
+                c = c.map(|x| x * k);
             }
             if let Some(wb) = &m.adjust.wb {
                 let a = pe_colour::apply(wb, c);
@@ -864,8 +940,7 @@ mod tests {
                 x: 50.0,
                 y: 0.5,
                 display: grey,
-                clarity: 0.0,
-                texture: 0.0,
+                ..PixelContext::neutral()
             },
             &mut vals,
             luma,
@@ -883,8 +958,7 @@ mod tests {
                 x: 50.0,
                 y: 99.5,
                 display: grey,
-                clarity: 0.0,
-                texture: 0.0,
+                ..PixelContext::neutral()
             },
             &mut vals,
             luma,

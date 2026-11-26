@@ -206,6 +206,10 @@ fn cases() -> Vec<(&'static str, Settings)> {
         ("masks: gradients and brush", masks_case_a()),
         ("masks: ranges, raster, local detail", masks_case_b()),
         (
+            "masks: local noise reduction, dehaze, sharpness",
+            masks_case_c(),
+        ),
+        (
             "black & white, grading",
             Settings {
                 treatment: pe_pipeline::Treatment::Monochrome,
@@ -502,5 +506,41 @@ fn masks_case_b() -> Settings {
         masks: vec![lum, colour, subject],
         rasters: std::sync::Arc::new(rasters),
         ..Default::default()
+    }
+}
+
+fn masks_case_c() -> Settings {
+    let radial = |cx: f32| Shape::Radial {
+        cx,
+        cy: 0.5,
+        rx: 0.3,
+        ry: 0.4,
+        angle: 20.0,
+        feather: 0.6,
+    };
+    let a = mask(
+        "left",
+        vec![comp(Combine::Add, false, radial(0.3))],
+        LocalAdjust {
+            noise: 80.0,
+            dehaze: 60.0,
+            sharpness: 70.0,
+            ..Default::default()
+        },
+    );
+    let b = mask(
+        "right",
+        vec![comp(Combine::Add, false, radial(0.75))],
+        LocalAdjust {
+            dehaze: -70.0,
+            sharpness: -60.0,
+            ..Default::default()
+        },
+    );
+    Settings {
+        shadows: 40.0,
+        clarity: 25.0,
+        masks: vec![a, b],
+        ..Settings::default()
     }
 }
