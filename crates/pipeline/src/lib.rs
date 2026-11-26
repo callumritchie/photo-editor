@@ -20,6 +20,7 @@ pub mod filter;
 pub mod geometry;
 pub mod local;
 pub mod look;
+pub mod masks;
 pub mod orient;
 pub mod settings;
 pub mod tone;
@@ -222,7 +223,10 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
     if let Some(a) = airlight {
         local::dehaze(&mut data, w, h, settings.dehaze, a);
     }
-    if let Some(gains) = local::local_gains(&data, w, h, &settings) {
+    let geo = geometry::GeometryParams::new(&settings, w, h, frame.orientation);
+    let mp = masks::MaskParams::new(&settings.masks, &settings.rasters, geo.frame_w, geo.frame_h);
+    let planes = local::local_planes(&data, w, h, &settings, mp.needs_clarity, mp.needs_texture);
+    if let Some(gains) = &planes.gains {
         data.par_chunks_mut(3)
             .zip(gains.par_iter())
             .for_each(|(px, g)| {
@@ -236,17 +240,43 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
     let look_params = look::LookParams::new(&settings);
     // The point curve is defined on sRGB-encoded display values, independent of the output space.
     let curve = tone::CurveLut::new(&settings.tone_curve);
-    data.par_chunks_mut(3).for_each(|px| {
-        let mut d = look_params.apply(params.apply([px[0], px[1], px[2]], REC2020_LUMA));
-        if let Some(c) = &curve {
-            for v in &mut d {
-                *v = pe_colour::srgb_decode(c.apply(pe_colour::srgb_encode(v.clamp(0.0, 1.0))));
+    data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        for (x, px) in row.chunks_mut(3).enumerate() {
+            let mut c = [px[0], px[1], px[2]];
+            let mut values = [0.0f32; masks::MAX_MASKS];
+            if !mp.is_empty() {
+                let display = if mp.needs_display {
+                    params.apply(c, REC2020_LUMA)
+                } else {
+                    c
+                };
+                let i = y * w + x;
+                let cd = planes.clarity.as_ref().map_or(0.0, |p| p[i]);
+                let td = planes.texture.as_ref().map_or(0.0, |p| p[i]);
+                let (fx, fy) = masks::frame_position(x, y, w, h, geo.orientation);
+                let at = masks::PixelContext {
+                    x: fx,
+                    y: fy,
+                    display,
+                    clarity: cd,
+                    texture: td,
+                };
+                c = mp.apply_scene(c, &at, &mut values, REC2020_LUMA);
             }
+            let mut d = look_params.apply(params.apply(c, REC2020_LUMA));
+            if mp.needs_saturation {
+                d = mp.apply_saturation(d, &values);
+            }
+            if let Some(cv) = &curve {
+                for v in &mut d {
+                    *v =
+                        pe_colour::srgb_decode(cv.apply(pe_colour::srgb_encode(v.clamp(0.0, 1.0))));
+                }
+            }
+            px.copy_from_slice(&d);
         }
-        px.copy_from_slice(&d);
     });
 
-    let geo = geometry::GeometryParams::new(&settings, w, h, frame.orientation);
     let (w, h, mut data) = if geo.active {
         geometry::resample(&data, &geo)
     } else if geo.orientation != 1 {

@@ -223,12 +223,35 @@ fn self_guided(small: &Plane, r: usize, eps: f32) -> (Plane, Plane) {
     guided_coeffs(small, small, r, eps)
 }
 
-/// Per-pixel luminance gain for shadows/highlights, clarity and texture. `None` when all are zero.
-pub fn local_gains(rgb: &[f32], w: usize, h: usize, s: &Settings) -> Option<Vec<f32>> {
+/// Per-pixel results of the local stage.
+#[derive(Debug, Clone, Default)]
+pub struct LocalPlanes {
+    /// Global luminance gain (shadows/highlights, clarity, texture), when any is set.
+    pub gains: Option<Vec<f32>>,
+    /// Clarity detail (log2 stops, midtone-weighted), unscaled; for global and masked clarity.
+    pub clarity: Option<Vec<f32>>,
+    /// Texture detail (log2 stops, soft-limited), unscaled.
+    pub texture: Option<Vec<f32>>,
+}
+
+/// Compute the local stage. Detail planes are produced when the global sliders or masks
+/// (`need_clarity`, `need_texture`) use them.
+pub fn local_planes(
+    rgb: &[f32],
+    w: usize,
+    h: usize,
+    s: &Settings,
+    need_clarity: bool,
+    need_texture: bool,
+) -> LocalPlanes {
     let sh = s.shadows != 0.0 || s.highlights != 0.0;
-    let (cl, tx) = (s.clarity != 0.0, s.texture != 0.0);
+    let (cl, tx) = (
+        s.clarity != 0.0 || need_clarity,
+        s.texture != 0.0 || need_texture,
+    );
+    let global = sh || s.clarity != 0.0 || s.texture != 0.0;
     if !(sh || cl || tx) {
-        return None;
+        return LocalPlanes::default();
     }
     let g = geometry(w, h);
     let logy: Vec<f32> = rgb
@@ -247,10 +270,14 @@ pub fn local_gains(rgb: &[f32], w: usize, h: usize, s: &Settings) -> Option<Vec<
     );
     let grey = MID_GREY.log2();
     let inv = 1.0 / g.factor as f32;
-    let mut gains = vec![1.0; w * h];
-    gains.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+    let n = w * h;
+    let mut gains = vec![1.0f32; if global { n } else { 0 }];
+    let mut cdet = vec![0.0f32; if cl { n } else { 0 }];
+    let mut tdet = vec![0.0f32; if tx { n } else { 0 }];
+    let rows = (0..h).into_par_iter().map(|y| {
         let fy = (y as f32 + 0.5) * inv;
-        for (x, gain) in row.iter_mut().enumerate() {
+        let mut row = (vec![1.0f32; w], vec![0.0f32; w], vec![0.0f32; w]);
+        for x in 0..w {
             let fx = (x as f32 + 0.5) * inv;
             let i = y * w + x;
             let l = full.data[i];
@@ -262,16 +289,43 @@ pub fn local_gains(rgb: &[f32], w: usize, h: usize, s: &Settings) -> Option<Vec<
             if let Some((ma, mb)) = &cl_c {
                 let base = ma.sample(fx, fy) * l + mb.sample(fx, fy);
                 let m = base - grey;
-                d += kc * (l - base) * (-(m * m) / 8.0).exp();
+                let dc = (l - base) * (-(m * m) / 8.0).exp();
+                row.1[x] = dc;
+                d += kc * dc;
             }
             if let Some(b) = &blurred {
                 let dt = l - b.data[i];
-                d += kt * dt / (1.0 + dt.abs() / TEXTURE_KNEE);
+                let dt = dt / (1.0 + dt.abs() / TEXTURE_KNEE);
+                row.2[x] = dt;
+                d += kt * dt;
             }
-            *gain = d.exp2();
+            row.0[x] = d.exp2();
         }
+        row
     });
-    Some(gains)
+    let rows: Vec<_> = rows.collect();
+    for (y, (g0, c0, t0)) in rows.into_iter().enumerate() {
+        let r = y * w..(y + 1) * w;
+        if global {
+            gains[r.clone()].copy_from_slice(&g0);
+        }
+        if cl {
+            cdet[r.clone()].copy_from_slice(&c0);
+        }
+        if tx {
+            tdet[r].copy_from_slice(&t0);
+        }
+    }
+    LocalPlanes {
+        gains: global.then_some(gains),
+        clarity: cl.then_some(cdet),
+        texture: tx.then_some(tdet),
+    }
+}
+
+/// Per-pixel luminance gain for shadows/highlights, clarity and texture. `None` when all are zero.
+pub fn local_gains(rgb: &[f32], w: usize, h: usize, s: &Settings) -> Option<Vec<f32>> {
+    local_planes(rgb, w, h, s, false, false).gains
 }
 
 #[cfg(test)]

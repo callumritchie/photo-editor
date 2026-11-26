@@ -38,12 +38,14 @@ pub enum Group {
     Crop,
     Transform,
     LensCorrections,
+    /// Local adjustments (not part of "looks": they belong to one picture).
+    Masks,
     /// Technical processing choices (demosaic method, orientation handling). Not part of "looks".
     Processing,
 }
 
 impl Group {
-    pub const ALL: [Group; 21] = [
+    pub const ALL: [Group; 22] = [
         Group::WhiteBalance,
         Group::Exposure,
         Group::Contrast,
@@ -64,12 +66,13 @@ impl Group {
         Group::Crop,
         Group::Transform,
         Group::LensCorrections,
+        Group::Masks,
         Group::Processing,
     ];
 
     /// Whether the group is part of a "look" (the default selection for presets and paste).
     pub fn is_look(self) -> bool {
-        !matches!(self, Group::Processing | Group::Crop)
+        !matches!(self, Group::Processing | Group::Crop | Group::Masks)
     }
 
     pub fn label(self) -> &'static str {
@@ -94,6 +97,7 @@ impl Group {
             Group::Crop => "Crop",
             Group::Transform => "Transform",
             Group::LensCorrections => "Lens Corrections",
+            Group::Masks => "Masks",
             Group::Processing => "Processing",
         }
     }
@@ -121,6 +125,7 @@ impl Group {
             Group::Crop => &["crop"],
             Group::Transform => &["transform"],
             Group::LensCorrections => &["lens"],
+            Group::Masks => &["masks"],
             Group::Processing => &["demosaic", "applyOrientation"],
         }
     }

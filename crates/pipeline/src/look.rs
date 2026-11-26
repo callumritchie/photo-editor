@@ -53,6 +53,11 @@ pub const LAB_TO_LMS: Mat3 = [
     [1.0, -0.089_484_18, -1.291_485_5],
 ];
 
+/// OKLab's linear sRGB -> LMS matrix.
+pub fn srgb_to_lms() -> Mat3 {
+    SRGB_TO_LMS
+}
+
 /// Derived constants for the colour stage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LookParams {

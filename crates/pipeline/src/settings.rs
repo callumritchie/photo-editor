@@ -291,6 +291,12 @@ pub struct Settings {
     pub crop: Crop,
     pub transform: Transform,
     pub lens: LensCorrection,
+    /// Local adjustments, applied in order.
+    pub masks: Vec<crate::masks::Mask>,
+    /// Mask images referenced by raster components (subject / sky). Supplied by the catalog or the
+    /// app; not part of the settings JSON (masks refer to them by id).
+    #[serde(skip)]
+    pub rasters: crate::masks::Rasters,
     pub demosaic: Demosaic,
     /// Apply the camera orientation (rotate/flip) to the output.
     pub apply_orientation: bool,
@@ -324,6 +330,8 @@ impl Default for Settings {
             crop: Crop::default(),
             transform: Transform::default(),
             lens: LensCorrection::default(),
+            masks: Vec::new(),
+            rasters: Default::default(),
             demosaic: Demosaic::Auto,
             apply_orientation: true,
         }
@@ -394,6 +402,25 @@ impl Settings {
             &mut l.ca_blue_yellow,
         ] {
             *x = x.clamp(-100.0, 100.0);
+        }
+        for m in &mut self.masks {
+            m.amount = m.amount.clamp(0.0, 100.0);
+            let a = &mut m.adjust;
+            a.exposure = a.exposure.clamp(-4.0, 4.0);
+            for v in [
+                &mut a.temperature,
+                &mut a.tint,
+                &mut a.contrast,
+                &mut a.highlights,
+                &mut a.shadows,
+                &mut a.whites,
+                &mut a.blacks,
+                &mut a.texture,
+                &mut a.clarity,
+                &mut a.saturation,
+            ] {
+                *v = v.clamp(-100.0, 100.0);
+            }
         }
         let n = &mut self.noise_reduction;
         for v in [&mut n.luminance, &mut n.detail, &mut n.color] {
