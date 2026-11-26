@@ -28,12 +28,16 @@ struct Params {
 struct Pass {
     src: u32,
     dst: u32,
+    aux: u32,             // a second input plane, where used
+    mode: u32,
     w: u32,               // destination (or source for blurs) width, height
     h: u32,
     sw: u32,              // source width, height (downscale)
     sh: u32,
-    r: u32,               // radius
-    mode: u32,
+    r: u32,               // radius or à trous hole
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
     k: vec4<f32>,
 };
 
@@ -208,6 +212,120 @@ fn coeffs(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
     let cov = m.z - m.x * m.y;
     let a = cov / (v + Q.k.x);
     pool[Q.dst + i] = vec4<f32>(a, m.y - a * m.x, 0.0, 0.0);
+}
+
+// --- Detail (detail.rs): noise reduction and sharpening in the opponent domain ---------------------
+
+@compute @workgroup_size(256)
+fn to_opponent(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    let v = sqrt(max(pool[Q.src + i].xyz, vec3<f32>(0.0)));
+    pool[Q.dst + i] = vec4<f32>((v.x + v.y + v.z) / 3.0, (v.x - v.z) / 2.0, (2.0 * v.y - v.x - v.z) / 4.0, 0.0);
+}
+
+@compute @workgroup_size(256)
+fn from_opponent(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    let o = pool[Q.src + i];
+    let v = max(vec3<f32>(o.x - 2.0 / 3.0 * o.z + o.y, o.x + 4.0 / 3.0 * o.z, o.x - 2.0 / 3.0 * o.z - o.y), vec3<f32>(0.0));
+    let c = v * v;
+    pool[Q.dst + i] = vec4<f32>(c, log2(max(luma(c), 1.0e-6)));
+}
+
+const B3 = array<f32, 5>(1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0);
+
+fn shrink(d: f32, t: f32, keep: f32) -> f32 { return d - (1.0 - keep) * clamp(d, -t, t); }
+
+// One whole wavelet level: next (dst) = 5x5 B3 smoothing of cur (src) with hole Q.r (the separable
+// CPU passes as one 2D kernel, clamped per axis), and acc (aux) += shrink(cur - next). mode 0 starts
+// the accumulator from zero. Thresholds k.xyz, luminance keep k.w.
+@compute @workgroup_size(256)
+fn atrous_level(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    let x = i32(i % Q.w);
+    let y = i32(i / Q.w);
+    let hole = i32(Q.r);
+    var next = vec4<f32>(0.0);
+    for (var j = 0; j < 5; j++) {
+        let yy = u32(clamp(y + (j - 2) * hole, 0, i32(Q.h) - 1));
+        var row = vec4<f32>(0.0);
+        for (var k = 0; k < 5; k++) {
+            let xx = u32(clamp(x + (k - 2) * hole, 0, i32(Q.w) - 1));
+            row += B3[k] * pool[Q.src + yy * Q.w + xx];
+        }
+        next += B3[j] * row;
+    }
+    let d = pool[Q.src + i] - next;
+    var a = vec4<f32>(0.0);
+    if (Q.mode != 0u) { a = pool[Q.aux + i]; }
+    a.x += shrink(d.x, Q.k.x, Q.k.w);
+    a.y += shrink(d.y, Q.k.y, 0.0);
+    a.z += shrink(d.z, Q.k.z, 0.0);
+    pool[Q.aux + i] = a;
+    pool[Q.dst + i] = next;
+}
+
+// dst = src + aux (coarsest level plus the kept detail).
+@compute @workgroup_size(256)
+fn add_planes(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    var v = pool[Q.src + i];
+    let a = pool[Q.aux + i];
+    v.x += a.x;
+    v.y += a.y;
+    v.z += a.z;
+    pool[Q.dst + i] = v;
+}
+
+// Gaussian pass, sigma k.x, radius ceil(3 sigma) >= 1. mode 0 horizontal, 1 vertical.
+@compute @workgroup_size(256)
+fn gauss(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    let x = i32(i % Q.w);
+    let y = i32(i / Q.w);
+    let s = Q.k.x;
+    let r = i32(max(ceil(3.0 * s), 1.0));
+    var acc = vec4<f32>(0.0);
+    var sum = 0.0;
+    for (var k = -r; k <= r; k++) {
+        let wgt = exp(-f32(k * k) / (2.0 * s * s));
+        var j = 0u;
+        if (Q.mode == 0u) { j = u32(y) * Q.w + u32(clamp(x + k, 0, i32(Q.w) - 1)); }
+        else { j = u32(clamp(y + k, 0, i32(Q.h) - 1)) * Q.w + u32(x); }
+        acc += wgt * pool[Q.src + j];
+        sum += wgt;
+    }
+    pool[Q.dst + i] = acc / sum;
+}
+
+// Unsharp mask on O1: src/dst opponent plane, aux blurred plane. k = (amount, knee, mask, 0).
+@compute @workgroup_size(256)
+fn sharpen(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= Q.w * Q.h) { return; }
+    let x = i % Q.w;
+    let y = i / Q.w;
+    var v = pool[Q.src + i];
+    let b = pool[Q.aux + i].x;
+    var d = v.x - b;
+    d = d / (1.0 + abs(d) / Q.k.y);
+    var m = 1.0;
+    if (Q.k.z > 0.0) {
+        let xr = min(x + 1u, Q.w - 1u);
+        let xl = select(x - 1u, 0u, x == 0u);
+        let yd = min(y + 1u, Q.h - 1u);
+        let yu = select(y - 1u, 0u, y == 0u);
+        let gx = pool[Q.aux + y * Q.w + xr].x - pool[Q.aux + y * Q.w + xl].x;
+        let gy = pool[Q.aux + yd * Q.w + x].x - pool[Q.aux + yu * Q.w + x].x;
+        m = smoothstep_(Q.k.z, 2.0 * Q.k.z, abs(gx) + abs(gy));
+    }
+    v.x += Q.k.x * d * m;
+    pool[Q.dst + i] = v;
 }
 
 // Bilinear sample of a reduced coefficient plane (pixel centres at integer + 0.5).

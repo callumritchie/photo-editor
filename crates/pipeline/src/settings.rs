@@ -89,6 +89,53 @@ impl Default for Grading {
     }
 }
 
+/// Capture sharpening.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Sharpening {
+    /// 0..150.
+    pub amount: f32,
+    /// Blur radius in sensor pixels, 0.5..3.
+    pub radius: f32,
+    /// 0..100: low suppresses halos, high keeps fine texture.
+    pub detail: f32,
+    /// 0..100: restrict sharpening to edges.
+    pub masking: f32,
+}
+
+impl Default for Sharpening {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            radius: 1.0,
+            detail: 25.0,
+            masking: 0.0,
+        }
+    }
+}
+
+/// Noise reduction strengths.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NoiseReduction {
+    /// 0..100.
+    pub luminance: f32,
+    /// 0..100: how much fine luminance detail to keep.
+    pub detail: f32,
+    /// 0..100.
+    pub color: f32,
+}
+
+impl Default for NoiseReduction {
+    fn default() -> Self {
+        Self {
+            luminance: 0.0,
+            detail: 50.0,
+            color: 0.0,
+        }
+    }
+}
+
 /// Current rendering algorithm generation.
 pub const PROCESS_VERSION: u32 = 1;
 
@@ -129,6 +176,8 @@ pub struct Settings {
     /// Black-and-white mix: how light each hue band becomes in monochrome. -100..100 each.
     pub bw_mix: [f32; HUE_BANDS],
     pub grading: Grading,
+    pub sharpening: Sharpening,
+    pub noise_reduction: NoiseReduction,
     pub demosaic: Demosaic,
     /// Apply the camera orientation (rotate/flip) to the output.
     pub apply_orientation: bool,
@@ -155,6 +204,8 @@ impl Default for Settings {
             treatment: Treatment::Color,
             bw_mix: [0.0; HUE_BANDS],
             grading: Grading::default(),
+            sharpening: Sharpening::default(),
+            noise_reduction: NoiseReduction::default(),
             demosaic: Demosaic::Auto,
             apply_orientation: true,
         }
@@ -187,6 +238,15 @@ impl Settings {
             *v = v.clamp(-100.0, 100.0);
         }
         g.blending = g.blending.clamp(0.0, 100.0);
+        let sh = &mut self.sharpening;
+        sh.amount = sh.amount.clamp(0.0, 150.0);
+        sh.radius = sh.radius.clamp(0.5, 3.0);
+        sh.detail = sh.detail.clamp(0.0, 100.0);
+        sh.masking = sh.masking.clamp(0.0, 100.0);
+        let n = &mut self.noise_reduction;
+        for v in [&mut n.luminance, &mut n.detail, &mut n.color] {
+            *v = v.clamp(0.0, 100.0);
+        }
         for w in [
             &mut g.shadows,
             &mut g.midtones,

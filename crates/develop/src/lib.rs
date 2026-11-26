@@ -30,12 +30,14 @@ pub enum Group {
     /// Treatment (colour / black and white) and the black-and-white mix.
     BlackWhite,
     ColorGrading,
+    Sharpening,
+    NoiseReduction,
     /// Technical processing choices (demosaic method, orientation handling). Not part of "looks".
     Processing,
 }
 
 impl Group {
-    pub const ALL: [Group; 14] = [
+    pub const ALL: [Group; 16] = [
         Group::WhiteBalance,
         Group::Exposure,
         Group::Contrast,
@@ -49,6 +51,8 @@ impl Group {
         Group::ColorMixer,
         Group::BlackWhite,
         Group::ColorGrading,
+        Group::Sharpening,
+        Group::NoiseReduction,
         Group::Processing,
     ];
 
@@ -72,6 +76,8 @@ impl Group {
             Group::ColorMixer => "Color Mixer",
             Group::BlackWhite => "Black & White",
             Group::ColorGrading => "Color Grading",
+            Group::Sharpening => "Sharpening",
+            Group::NoiseReduction => "Noise Reduction",
             Group::Processing => "Processing",
         }
     }
@@ -92,6 +98,8 @@ impl Group {
             Group::ColorMixer => &["hsl"],
             Group::BlackWhite => &["treatment", "bwMix"],
             Group::ColorGrading => &["grading"],
+            Group::Sharpening => &["sharpening"],
+            Group::NoiseReduction => &["noiseReduction"],
             Group::Processing => &["demosaic", "applyOrientation"],
         }
     }
@@ -286,6 +294,69 @@ fn build_params() -> Vec<ParamSpec> {
         "Balance",
         Group::ColorGrading,
         "Color Grading",
+    ));
+    let d = |key: &str, label: &str, group, sub| ParamSpec {
+        min: 0.0,
+        subsection: Some(sub),
+        ..spec(key, label, group, "Detail")
+    };
+    v.push(ParamSpec {
+        max: 150.0,
+        ..d(
+            "sharpening.amount",
+            "Amount",
+            Group::Sharpening,
+            "Sharpening",
+        )
+    });
+    v.push(ParamSpec {
+        min: 0.5,
+        max: 3.0,
+        step: 0.1,
+        default: 1.0,
+        precision: 1,
+        ..d(
+            "sharpening.radius",
+            "Radius",
+            Group::Sharpening,
+            "Sharpening",
+        )
+    });
+    v.push(ParamSpec {
+        default: 25.0,
+        ..d(
+            "sharpening.detail",
+            "Detail",
+            Group::Sharpening,
+            "Sharpening",
+        )
+    });
+    v.push(d(
+        "sharpening.masking",
+        "Masking",
+        Group::Sharpening,
+        "Sharpening",
+    ));
+    v.push(d(
+        "noiseReduction.luminance",
+        "Luminance",
+        Group::NoiseReduction,
+        "Noise Reduction",
+    ));
+    v.push(ParamSpec {
+        default: 50.0,
+        ..d(
+            "noiseReduction.detail",
+            "Detail",
+            Group::NoiseReduction,
+            "Noise Reduction",
+        )
+    });
+    v.push(d(
+        "noiseReduction.color",
+        "Color",
+        Group::NoiseReduction,
+        "Noise Reduction",
     ));
     v
 }

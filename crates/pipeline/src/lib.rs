@@ -4,7 +4,7 @@
 //! 1. demosaic (camera-native, pre white balance)
 //! 2. white balance + highlight reconstruction (camera space)
 //! 3. camera -> linear Rec.2020 working space; exposure
-//! 4. dehaze; local tone (shadows / highlights, clarity, texture)
+//! 4. noise reduction, sharpening; dehaze; local tone (shadows / highlights, clarity, texture)
 //! 5. contrast, filmic display transform (whites), black level; colour (mixer, vibrance/saturation,
 //!    black and white, grading)
 //! 6. Rec.2020 -> linear sRGB, gamut mapping, sRGB encoding
@@ -13,6 +13,7 @@
 //! `pe-gpu` implements the same stages for linear-RGB frames and is tested against this path.
 
 pub mod demosaic;
+pub mod detail;
 pub mod filter;
 pub mod local;
 pub mod look;
@@ -22,8 +23,8 @@ pub mod tone;
 pub mod wb;
 
 pub use settings::{
-    Demosaic, GradeWheel, Grading, Hsl, Settings, Treatment, WhiteBalance, HUE_BANDS,
-    PROCESS_VERSION,
+    Demosaic, GradeWheel, Grading, Hsl, NoiseReduction, Settings, Sharpening, Treatment,
+    WhiteBalance, HUE_BANDS, PROCESS_VERSION,
 };
 
 pub use pe_colour::ColorSpace;
@@ -81,6 +82,7 @@ pub fn prepare_preview(frame: &RawFrame, long_edge: usize) -> RawFrame {
         width: w,
         height: h,
         data,
+        scale: base.scale * base.width as f32 / w as f32,
         ..base.clone_header()
     }
 }
@@ -168,6 +170,7 @@ fn superpixel(frame: &RawFrame, cfa: &pe_raw::Cfa) -> RawFrame {
         height: h,
         layout: Layout::LinearRgb,
         data,
+        scale: frame.scale * block as f32,
         ..frame.clone_header()
     }
 }
@@ -188,6 +191,27 @@ pub fn render_display(frame: &RawFrame, settings: &Settings) -> Result<RgbImage,
     let (w, h) = (scene.width, scene.height);
     let mut data = scene.data;
 
+    let dp = detail::DetailParams::new(&settings, [0.0; 3], frame.scale);
+    if dp.enabled() {
+        let noise = if dp.nr {
+            // Measured without exposure (so exposure changes need no new measurement) and scaled:
+            // noise of sqrt(g x) is sqrt(g) times that of sqrt(x).
+            let g = settings.exposure.exp2();
+            let n = detail::noise_sigma(w, h, |x, y| {
+                let i = (y * w + x) * 3;
+                [data[i] / g, data[i + 1] / g, data[i + 2] / g]
+            });
+            n.map(|v| v * g.sqrt())
+        } else {
+            [0.0; 3]
+        };
+        detail::apply(
+            &mut data,
+            w,
+            h,
+            &detail::DetailParams::new(&settings, noise, frame.scale),
+        );
+    }
     if settings.dehaze != 0.0 {
         let a = local::airlight(&local::airlight_samples(&data, w, h));
         local::dehaze(&mut data, w, h, settings.dehaze, a);
@@ -370,6 +394,7 @@ mod tests {
             wb: [1.5, 1.0, 1.8],
             xyz_to_cam: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             orientation: 1,
+            scale: 1.0,
         };
         let s = Settings::default();
         let draft = render_draft(&frame, &s).unwrap();

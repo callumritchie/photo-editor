@@ -11,6 +11,7 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | 4 | Highlight reconstruction | `lib.rs` | A clipped channel is raised to the brightest unclipped channel of the same pixel, so blown areas trend to neutral instead of magenta, and stay above 1.0 for the tone stage |
 | 5 | Camera → working space | `pe-colour` | Camera matrix composed with Rec.2020 primaries, rows normalised so camera white → (1,1,1), inverted |
 | 6 | Exposure | `lib.rs` | Gain of 2^EV in scene-linear light |
+| 6a | Noise reduction, sharpening | `detail.rs` | On square-rooted (variance-stabilised) values in an opponent space (mean; (R−B)/2; (2G−R−B)/4). **Noise reduction:** five-level à-trous B3-spline wavelets (Starck & Murtagh), soft-thresholding each level at a multiple of the noise measured in the frame (MAD of the finest level on a 1-in-16 grid, before exposure, scaled by √gain), so the sliders mean the same on previews and exports. Luminance keeps part of the removed detail (Detail); colour does not. **Sharpening:** unsharp mask on luminance, radius in sensor pixels (scaled by the frame's reduction), detail soft-limited against halos, optional edge mask (Masking) |
 | 6b | Dehaze | `local.rs` | Dark channel prior (He, Sun & Tang 2009): airlight from the brightest 0.1% of dark-channel samples (1-in-4 grid); transmission from a patch minimum (~1% radius) refined by a guided filter with luminance as guide (~3% radius); scene recovered as (I − A)/t + A, t ≥ 0.1. Negative values mix towards the airlight |
 | 7 | Shadows / Highlights | `tone.rs`, `filter.rs` | log2 luminance split into base + detail with a fast guided filter (He & Sun 2015) at ~2% radius. The base is shifted by up to ±1.5 EV with smooth masks for dark/bright regions and applied as an RGB gain, so local detail is preserved and halos are limited |
 | 7b | Clarity / Texture | `local.rs` | One luminance gain with shadows/highlights. **Clarity:** log-luminance detail above a guided-filter base (~0.8% radius), weighted to midtones. **Texture:** detail above a ~0.2% box blur, soft-limited so edges do not halo. All radii are fractions of the short side, so previews and exports match |
@@ -30,6 +31,8 @@ All processing is 32-bit float. Values stay scene-linear and unclipped until the
 | `contrast`, `highlights`, `shadows`, `whites`, `blacks` | −100…100 | 0 |
 | `toneCurve` | list of `[x, y]` on 0…255 | identity |
 | `texture`, `clarity`, `dehaze` | −100…100 | 0 |
+| `sharpening` | `amount` 0…150, `radius` 0.5…3 (sensor px), `detail` 0…100, `masking` 0…100 | 0, 1.0, 25, 0 |
+| `noiseReduction` | `luminance`, `detail`, `color`: 0…100 | 0, 50, 0 |
 | `vibrance`, `saturation` | −100…100 | 0 |
 | `hsl` | `{"hue":[8], "saturation":[8], "luminance":[8]}`, each −100…100, bands red, orange, yellow, green, aqua, blue, purple, magenta | 0 |
 | `treatment` | `color` / `monochrome` | color |

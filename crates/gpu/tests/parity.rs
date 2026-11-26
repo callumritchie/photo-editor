@@ -105,6 +105,35 @@ fn cases() -> Vec<(&'static str, Settings)> {
             },
         ),
         (
+            "noise reduction",
+            Settings {
+                noise_reduction: pe_pipeline::NoiseReduction {
+                    luminance: 90.0,
+                    detail: 30.0,
+                    color: 100.0,
+                },
+                exposure: 1.0,
+                ..d.clone()
+            },
+        ),
+        (
+            "sharpening with masking + nr",
+            Settings {
+                sharpening: pe_pipeline::Sharpening {
+                    amount: 150.0,
+                    radius: 2.5,
+                    detail: 60.0,
+                    masking: 40.0,
+                },
+                noise_reduction: pe_pipeline::NoiseReduction {
+                    luminance: 30.0,
+                    detail: 50.0,
+                    color: 25.0,
+                },
+                ..d.clone()
+            },
+        ),
+        (
             "black & white, grading",
             Settings {
                 treatment: pe_pipeline::Treatment::Monochrome,

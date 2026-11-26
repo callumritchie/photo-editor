@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use bytemuck::{Pod, Zeroable};
 use pe_colour::{ColorSpace, REC2020_TO_XYZ_D65};
-use pe_pipeline::{local, look, tone, wb, Settings, WhiteBalance};
+use pe_pipeline::{detail, local, look, tone, wb, Settings, WhiteBalance};
 use pe_raw::{Layout, RawFrame};
 use wgpu::util::DeviceExt;
 
@@ -53,12 +53,14 @@ struct Params {
 struct PassUniform {
     src: u32,
     dst: u32,
+    aux: u32,
+    mode: u32,
     w: u32,
     h: u32,
     sw: u32,
     sh: u32,
     r: u32,
-    mode: u32,
+    pad: [u32; 3],
     k: [f32; 4],
 }
 
@@ -114,9 +116,15 @@ enum Kernel {
     Coeffs,
     DehazeApply,
     Final,
+    ToOpponent,
+    FromOpponent,
+    AddPlanes,
+    Gauss,
+    Sharpen,
+    AtrousLevel,
 }
 
-const ENTRY_POINTS: [&str; 8] = [
+const ENTRY_POINTS: [&str; 14] = [
     "scene_pass",
     "downscale",
     "min_filter",
@@ -125,6 +133,12 @@ const ENTRY_POINTS: [&str; 8] = [
     "coeffs",
     "dehaze_apply",
     "final_pass",
+    "to_opponent",
+    "from_opponent",
+    "add_planes",
+    "gauss",
+    "sharpen",
+    "atrous_level",
 ];
 
 /// A GPU device with the develop pipelines compiled.
@@ -144,6 +158,9 @@ struct Planes {
     tex_h: u32,
     tex: u32,
     s: [u32; 3],
+    /// Detail stage: opponent plane and wavelet accumulator (full size).
+    a: u32,
+    acc: u32,
     sh: u32,
     cl: u32,
     dz: u32,
@@ -158,8 +175,11 @@ pub struct GpuFrame {
     orientation: u8,
     header: RawFrame,
     auto_wb: [f32; 3],
-    /// Camera RGB on the airlight sampling grid (for dehaze).
-    airlight_cam: Vec<[f32; 3]>,
+    /// Camera RGB, for the airlight and noise estimates (computed on the CPU from sampled pixels).
+    host: Vec<f32>,
+    scale: f32,
+    /// Noise estimate cached for the scene transform it was made with.
+    noise: Mutex<Option<([u32; 4], [f32; 3])>>,
     params: wgpu::Buffer,
     look: wgpu::Buffer,
     passes: wgpu::Buffer,
@@ -306,12 +326,14 @@ impl Gpu {
             scene: 0,
             tex_h: n,
             tex: 2 * n,
-            s: [3 * n, 3 * n + m, 3 * n + 2 * m],
-            sh: 3 * n + 3 * m,
-            cl: 3 * n + 4 * m,
-            dz: 3 * n + 5 * m,
+            a: 3 * n,
+            acc: 4 * n,
+            s: [5 * n, 5 * n + m, 5 * n + 2 * m],
+            sh: 5 * n + 3 * m,
+            cl: 5 * n + 4 * m,
+            dz: 5 * n + 5 * m,
         };
-        let pool_bytes = (3 * n as u64 + 6 * m as u64) * 16;
+        let pool_bytes = (5 * n as u64 + 6 * m as u64) * 16;
         if pool_bytes > self.device.limits().max_storage_buffer_binding_size {
             return Err(GpuError::TooLarge(pool_bytes));
         }
@@ -379,7 +401,9 @@ impl Gpu {
             header: frame.clone_header(),
             // Grey-world needs the pixels; compute it now so no CPU copy has to be kept.
             auto_wb: wb::multipliers(frame, &WhiteBalance::Auto, &frame.data),
-            airlight_cam: local::airlight_samples(&frame.data, w, h),
+            host: frame.data.clone(),
+            scale: frame.scale,
+            noise: Mutex::new(None),
             params,
             look,
             passes,
@@ -436,16 +460,52 @@ impl Gpu {
             (f.width, f.height)
         };
 
+        // Scene pixel from the kept camera data, exactly as the CPU path computes it.
+        let fw = f.width as usize;
+        let scene_at = |x: usize, y: usize| {
+            let i = (y * fw + x) * 3;
+            pe_pipeline::scene_pixel(
+                [f.host[i], f.host[i + 1], f.host[i + 2]],
+                wbm,
+                &to_work,
+                gain,
+            )
+        };
+        let (wu, hu) = (f.width as usize, f.height as usize);
         // Airlight from the same sampled scene pixels the CPU path uses.
         let airlight = if s.dehaze != 0.0 {
-            let scene: Vec<[f32; 3]> = f
-                .airlight_cam
-                .iter()
-                .map(|c| pe_pipeline::scene_pixel(*c, wbm, &to_work, gain))
+            let samples: Vec<[f32; 3]> = (0..hu)
+                .step_by(local::AIRLIGHT_STRIDE)
+                .flat_map(|y| (0..wu).step_by(local::AIRLIGHT_STRIDE).map(move |x| (x, y)))
+                .map(|(x, y)| scene_at(x, y))
                 .collect();
-            local::airlight(&scene)
+            local::airlight(&samples)
         } else {
             [1.0; 3]
+        };
+        let detail_params = {
+            let probe = detail::DetailParams::new(&s, [0.0; 3], f.scale);
+            let noise = if probe.nr {
+                // Measured without exposure and scaled by sqrt(gain), as the CPU path does.
+                let key = [wbm[0].to_bits(), wbm[1].to_bits(), wbm[2].to_bits(), 0];
+                let mut cache = f.noise.lock().unwrap();
+                let n = match *cache {
+                    Some((k, n)) if k == key => n,
+                    _ => {
+                        let n = detail::noise_sigma(wu, hu, |x, y| {
+                            let i = (y * fw + x) * 3;
+                            let c = [f.host[i], f.host[i + 1], f.host[i + 2]];
+                            pe_pipeline::scene_pixel(c, wbm, &to_work, 1.0)
+                        });
+                        *cache = Some((key, n));
+                        n
+                    }
+                };
+                n.map(|v| v * gain.sqrt())
+            } else {
+                [0.0; 3]
+            };
+            detail::DetailParams::new(&s, noise, f.scale)
         };
         let ya = (airlight[0] * pe_colour::REC2020_LUMA[0]
             + airlight[1] * pe_colour::REC2020_LUMA[1]
@@ -522,6 +582,25 @@ impl Gpu {
             r,
             mode,
             k: [k, 0.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        // Full-size pass with an aux plane and four constants.
+        let full = |kern, src, dst, aux, r, mode, k: [f32; 4]| {
+            (
+                kern,
+                PassUniform {
+                    src,
+                    dst,
+                    aux,
+                    mode,
+                    w: fw,
+                    h: fh,
+                    r,
+                    k,
+                    ..Default::default()
+                },
+                fw * fh,
+            )
         };
         let small = |list: &mut Vec<_>, kern, src, dst, r, mode, k| {
             list.push((kern, rec(src, dst, sw, sh, r, mode, k), sw * sh));
@@ -533,6 +612,42 @@ impl Gpu {
         };
         let [s0, s1, s2] = pl.s;
         list.push((Kernel::Scene, PassUniform::default(), fw * fh));
+        if detail_params.enabled() {
+            let (a, t, c, acc) = (pl.a, pl.tex_h, pl.tex, pl.acc);
+            list.push(full(Kernel::ToOpponent, pl.scene, a, 0, 0, 0, [0.0; 4]));
+            let mut cur = a;
+            if detail_params.nr {
+                let mut next = c;
+                for (l, th) in detail_params.thresholds.iter().enumerate() {
+                    let hole = 1u32 << l;
+                    list.push(full(
+                        Kernel::AtrousLevel,
+                        cur,
+                        next,
+                        acc,
+                        hole,
+                        (l > 0) as u32,
+                        *th,
+                    ));
+                    std::mem::swap(&mut cur, &mut next);
+                }
+                list.push(full(Kernel::AddPlanes, cur, a, acc, 0, 0, [0.0; 4]));
+                cur = a;
+            }
+            if detail_params.sharpen {
+                let sg = [detail_params.sigma, 0.0, 0.0, 0.0];
+                list.push(full(Kernel::Gauss, cur, t, 0, 0, 0, sg));
+                list.push(full(Kernel::Gauss, t, c, 0, 0, 1, sg));
+                let k = [
+                    detail_params.amount,
+                    detail_params.knee,
+                    detail_params.mask,
+                    0.0,
+                ];
+                list.push(full(Kernel::Sharpen, cur, cur, c, 0, 0, k));
+            }
+            list.push(full(Kernel::FromOpponent, cur, pl.scene, 0, 0, 0, [0.0; 4]));
+        }
         if s.dehaze > 0.0 {
             let pr = g.patch_r as u32;
             small(&mut list, Kernel::Downscale, pl.scene, s0, 0, 0, 0.0);

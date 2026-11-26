@@ -17,7 +17,6 @@
 //!   brought in by desaturating towards the pixel's luminance.
 //! - **Point curve**: monotone cubic (Fritsch & Carlson 1980) through user points, on encoded values.
 
-
 pub const MID_GREY: f32 = 0.18;
 /// Maximum base-layer shift for Shadows/Highlights at +/-100, in stops.
 pub const LOCAL_MAX_EV: f32 = 1.5;

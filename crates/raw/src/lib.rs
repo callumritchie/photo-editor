@@ -94,6 +94,9 @@ pub struct RawFrame {
     pub xyz_to_cam: [[f32; 3]; 3],
     /// EXIF orientation code 1..=8 (1 = normal). Not yet applied to `data`.
     pub orientation: u8,
+    /// Sensor pixels per frame pixel along each axis: 1 for a decoded raw, more for reduced
+    /// previews. Pixel-scale effects (sharpening radius) use it to look alike at any size.
+    pub scale: f32,
 }
 
 impl RawFrame {
@@ -109,6 +112,7 @@ impl RawFrame {
             wb: self.wb,
             xyz_to_cam: self.xyz_to_cam,
             orientation: self.orientation,
+            scale: self.scale,
         }
     }
 }
@@ -224,6 +228,7 @@ fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
         wb,
         xyz_to_cam,
         orientation: orientation_code(&img.orientation),
+        scale: 1.0,
     })
 }
 

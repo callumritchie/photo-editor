@@ -50,6 +50,21 @@ fn main() {
             },
         ),
         (
+            "noise reduction + sharpening",
+            Settings {
+                noise_reduction: pe_pipeline::NoiseReduction {
+                    luminance: 50.0,
+                    detail: 50.0,
+                    color: 50.0,
+                },
+                sharpening: pe_pipeline::Sharpening {
+                    amount: 60.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        (
             "all local + colour",
             Settings {
                 shadows: 40.0,
