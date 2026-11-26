@@ -11,3 +11,4 @@ rawler.workspace = true
 thiserror.workspace = true
 image.workspace = true
 kamadak-exif.workspace = true
+pe-colour.workspace = true

@@ -109,3 +109,45 @@ fn keywords_are_embedded_as_xmp_in_every_format() {
         );
     }
 }
+
+#[test]
+fn edited_jpeg_exports_with_its_edits() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("p");
+    std::fs::create_dir_all(&src).unwrap();
+    image::RgbImage::from_pixel(120, 80, image::Rgb([60, 60, 60]))
+        .save(src.join("a.jpg"))
+        .unwrap();
+    let mut cat = Catalog::create(&t.path().join("lib.pecat")).unwrap();
+    cat.import(&[src], &ImportOptions::default(), &mut |_| {})
+        .unwrap();
+    let id = cat.images(&Query::default()).unwrap()[0].id;
+    let out = |cat: &Catalog, name: &str| {
+        let settings = ExportSettings {
+            destination: t.path().join(name),
+            format: Format::Png { sixteen_bit: false },
+            ..Default::default()
+        };
+        let r = cat.export(&[id], &settings, &mut |_| {}).unwrap();
+        image::open(&r.written[0]).unwrap().to_rgb8()
+    };
+    // Untouched: the same pixels (JPEG decodes 60 -> about 60).
+    let plain = out(&cat, "plain");
+    assert!((plain.get_pixel(60, 40).0[1] as i32 - 60).abs() <= 2);
+    // +1 stop and a crop: brighter (linear x2 -> sRGB 60 becomes ~ 86) and smaller.
+    let mut s = cat.develop_settings(id).unwrap();
+    s.exposure = 1.0;
+    s.crop.right = 0.5;
+    cat.develop_execute(
+        &[id],
+        &pe_catalog::DevelopCommand::Set {
+            settings: s,
+            label: None,
+        },
+    )
+    .unwrap();
+    let edited = out(&cat, "edited");
+    assert_eq!(edited.width(), 60);
+    let v = edited.get_pixel(30, 40).0[1] as i32;
+    assert!((v - 86).abs() <= 3, "{v}");
+}

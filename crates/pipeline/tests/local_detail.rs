@@ -40,6 +40,7 @@ fn frame(w: usize, h: usize) -> RawFrame {
         orientation: 1,
         scale: 1.0,
         lens: None,
+        rendered: false,
     }
 }
 

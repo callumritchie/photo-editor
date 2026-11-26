@@ -239,14 +239,17 @@ pub struct Rendered {
 }
 
 /// Render a photo with `settings` at preview size (on `gpu` if given) and encode both cache levels.
-/// Raws go through the pipeline; other files (JPEG) are shown as they are.
+/// Raws and edited JPEGs go through the pipeline; untouched JPEGs are shown as they are.
 pub fn render_previews(
     path: &Path,
     orientation: u8,
     settings: &pe_pipeline::Settings,
     gpu: Option<&pe_gpu::Gpu>,
 ) -> Result<Rendered, PreviewError> {
-    let img = if matches!(meta::file_kind(path), Some(FileKind::Raw)) {
+    // Raws, and edited JPEGs, go through the pipeline; an untouched JPEG is shown as it is.
+    let pipeline = matches!(meta::file_kind(path), Some(FileKind::Raw))
+        || *settings != pe_pipeline::Settings::default();
+    let img = if pipeline {
         let frame = pe_raw::decode_file(path)?;
         let small = pe_pipeline::prepare_preview(&frame, PREVIEW_LONG_EDGE as usize);
         drop(frame);

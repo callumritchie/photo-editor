@@ -203,6 +203,7 @@ mod tests {
             orientation,
             scale: 1.0,
             lens: None,
+            rendered: false,
         }
     }
 

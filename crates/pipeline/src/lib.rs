@@ -412,7 +412,8 @@ pub fn mask_overlay(
     let Some(m) = st.mp.masks.first() else {
         return Ok(None);
     };
-    let params = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
+    let params =
+        tone::ToneParams::new(s.contrast, s.whites, s.blacks).with_rendered(frame.rendered);
     let (w, h) = (st.w, st.h);
     let mut vals = vec![0.0f32; w * h * 3];
     vals.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
@@ -473,7 +474,8 @@ pub fn pick_color(
         (sx.max(0.0) as usize).min(w - 1),
         (sy.max(0.0) as usize).min(h - 1),
     );
-    let params = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
+    let params =
+        tone::ToneParams::new(s.contrast, s.whites, s.blacks).with_rendered(frame.rendered);
     // Average a small neighbourhood to avoid picking noise.
     let mut acc = [0.0f32; 3];
     let mut n = 0.0;
@@ -547,7 +549,8 @@ fn render_display_in(
         targets,
         airlight,
     } = scene_stage_in(frame, &settings, &ctx, globals)?;
-    let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks);
+    let params = tone::ToneParams::new(settings.contrast, settings.whites, settings.blacks)
+        .with_rendered(frame.rendered);
     let look_params = look::LookParams::new(&settings);
     // The point curve is defined on sRGB-encoded display values, independent of the output space.
     let curve = tone::CurveLut::new(&settings.tone_curve);
@@ -849,6 +852,7 @@ mod tests {
             orientation: 1,
             scale: 1.0,
             lens: None,
+            rendered: false,
         };
         let s = Settings::default();
         let draft = render_draft(&frame, &s).unwrap();

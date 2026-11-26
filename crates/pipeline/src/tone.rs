@@ -72,6 +72,8 @@ pub struct ToneParams {
     pub white_point: f32,
     pub white_norm: f32,
     pub black: f32,
+    /// Display-referred source (JPEG): no filmic transform, see [`with_rendered`](Self::with_rendered).
+    pub rendered: bool,
 }
 
 impl ToneParams {
@@ -83,7 +85,21 @@ impl ToneParams {
             white_point,
             white_norm: 1.0 / aces_fit(white_point),
             black: -blacks / 100.0 * 0.05,
+            rendered: false,
         }
+    }
+
+    /// For an already-rendered picture: values are display-linear already, so the display
+    /// transform is a plain scale (Whites moves the white point by up to 2 stops each way) and an
+    /// untouched picture comes out as it went in. Highlights pushed past white clip.
+    pub fn with_rendered(mut self, rendered: bool) -> Self {
+        if rendered {
+            // The same Whites response as the filmic white point (16 at 0), relative to 1.
+            self.white_point /= 16.0;
+            self.white_norm = 1.0 / self.white_point;
+            self.rendered = true;
+        }
+        self
     }
 
     /// Scene-linear RGB (working space) -> display-linear RGB (working space, may be out of gamut).
@@ -97,6 +113,15 @@ impl ToneParams {
                 let g = (y / MID_GREY).powf(self.contrast_power) * MID_GREY / y;
                 c = [c[0] * g, c[1] * g, c[2] * g];
             }
+        }
+        if self.rendered {
+            let mut out = c.map(|v| v * self.white_norm);
+            if self.black != 0.0 {
+                for v in &mut out {
+                    *v = ((*v - self.black) / (1.0 - self.black)).max(0.0);
+                }
+            }
+            return out;
         }
         // Display transform on the max-RGB norm, preserving ratios.
         let n = c[0].max(c[1]).max(c[2]);

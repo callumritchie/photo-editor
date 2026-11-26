@@ -776,7 +776,8 @@ impl Gpu {
             .ok_or(GpuError::SingularMatrix)?;
         let gain = s.exposure.exp2();
         let out_m = ColorSpace::Srgb.from_space(&REC2020_TO_XYZ_D65);
-        let tp = tone::ToneParams::new(s.contrast, s.whites, s.blacks);
+        let tp =
+            tone::ToneParams::new(s.contrast, s.whites, s.blacks).with_rendered(f.header.rendered);
         let (sev, hev) = tone::local_tone_amounts(s.shadows, s.highlights);
         let use_sh = s.shadows != 0.0 || s.highlights != 0.0;
         let mask_geo = geometry::GeometryParams::for_frame(&s, &f.header, ctx.full_w, ctx.full_h);
@@ -904,7 +905,7 @@ impl Gpu {
             wb: [wbm[0], wbm[1], wbm[2], gain],
             m: [row4(to_work[0]), row4(to_work[1]), row4(to_work[2])],
             o: [row4(out_m[0]), row4(out_m[1]), row4(out_m[2])],
-            out_luma: [luma[0], luma[1], luma[2], 0.0],
+            out_luma: [luma[0], luma[1], luma[2], tp.rendered as u32 as f32],
             tone: [
                 tp.contrast_power,
                 tp.white_norm,

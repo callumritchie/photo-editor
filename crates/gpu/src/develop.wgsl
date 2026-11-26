@@ -447,13 +447,19 @@ fn tone(px: vec3<f32>) -> vec3<f32> {
             c *= pow(y / MID_GREY, power) * MID_GREY / y;
         }
     }
+    let black = P.tone.z;
+    // Already-rendered picture (JPEG): plain scale to the white point (tone.rs with_rendered).
+    if (P.out_luma.w > 0.5) {
+        var r = c * P.tone.y;
+        if (black != 0.0) { r = max((r - vec3<f32>(black)) / (1.0 - black), vec3<f32>(0.0)); }
+        return r;
+    }
     let n = max(c.x, max(c.y, c.z));
     if (n <= 0.0) { return vec3<f32>(0.0); }
     let yd = min(aces_fit(n) * P.tone.y, 1.0);
     var o = c / n * yd;
     let t = smoothstep_(0.8, 1.0, yd);
     if (t > 0.0) { o += (vec3<f32>(yd) - o) * t; }
-    let black = P.tone.z;
     if (black != 0.0) { o = max((o - vec3<f32>(black)) / (1.0 - black), vec3<f32>(0.0)); }
     return o;
 }

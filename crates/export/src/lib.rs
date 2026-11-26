@@ -8,9 +8,9 @@ pub mod naming;
 pub mod process;
 pub mod xmp;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use pe_colour::{ColorSpace, REC2020_TO_XYZ_D65};
+use pe_colour::ColorSpace;
 use pe_pipeline::{RgbImage, Settings};
 use serde::{Deserialize, Serialize};
 
@@ -128,37 +128,12 @@ pub struct ExportProgress {
     pub total: usize,
 }
 
-fn is_raw(p: &Path) -> bool {
-    matches!(
-        pe_raw::meta::file_kind(p),
-        Some(pe_raw::meta::FileKind::Raw)
-    )
-}
-
-/// Display-linear Rec.2020 image for a source file. Raws go through the full pipeline with their
-/// settings; rendered files (JPEG) are taken as sRGB as-is.
+/// Display-linear Rec.2020 image for a source file, through the full pipeline with its settings.
+/// Rendered files (JPEG) come out unchanged when untouched (see `RawFrame::rendered`), upright and
+/// in their own colour space.
 pub fn display_image(item: &ExportItem) -> Result<RgbImage, ExportError> {
-    if is_raw(&item.source) {
-        let frame = pe_raw::decode_file(&item.source)?;
-        return Ok(pe_pipeline::render_display(&frame, &item.settings)?);
-    }
-    let rgb = pe_raw::meta::decode_jpeg(&item.source)?;
-    // sRGB linear -> Rec.2020 linear.
-    let to_work = ColorSpace::Srgb.from_space(&REC2020_TO_XYZ_D65);
-    let to_work = pe_colour::invert(&to_work).ok_or(ExportError::Internal("matrix"))?;
-    let data = rgb
-        .data
-        .chunks(3)
-        .flat_map(|p| {
-            let lin = [0, 1, 2].map(|c| pe_colour::srgb_decode(p[c] as f32 / 255.0));
-            pe_colour::apply(&to_work, lin)
-        })
-        .collect();
-    Ok(RgbImage {
-        width: rgb.width as usize,
-        height: rgb.height as usize,
-        data,
-    })
+    let frame = pe_raw::decode_file(&item.source)?;
+    Ok(pe_pipeline::render_display(&frame, &item.settings)?)
 }
 
 /// Render and encode one item to bytes (not for [`Format::Original`]). Returns (bytes, extension).

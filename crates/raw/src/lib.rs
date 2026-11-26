@@ -99,6 +99,9 @@ pub struct RawFrame {
     pub scale: f32,
     /// Lens and shooting parameters, when recorded (for lens profiles).
     pub lens: Option<LensInfo>,
+    /// An already-rendered (display-referred) picture such as a JPEG, decoded to linear light.
+    /// Rendering then skips the filmic display transform so untouched pictures look as they were.
+    pub rendered: bool,
 }
 
 /// The lens a photo was taken with.
@@ -126,12 +129,16 @@ impl RawFrame {
             orientation: self.orientation,
             scale: self.scale,
             lens: self.lens.clone(),
+            rendered: self.rendered,
         }
     }
 }
 
-/// Decode a raw file from disk.
+/// Decode a raw file (or a JPEG, see [`decode_rendered`]) from disk.
 pub fn decode_file(path: impl AsRef<Path>) -> Result<RawFrame, RawError> {
+    if meta::file_kind(path.as_ref()) == Some(meta::FileKind::Jpeg) {
+        return decode_rendered(path.as_ref());
+    }
     let img = rawler::decode_file(path.as_ref()).map_err(|e| RawError::Decoder(e.to_string()))?;
     let mut frame = from_rawler(img)?;
     frame.lens = meta::raw_metadata(path.as_ref()).ok().and_then(|m| {
@@ -142,6 +149,76 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<RawFrame, RawError> {
         })
     });
     Ok(frame)
+}
+
+/// The colour space an embedded ICC profile describes, recognised by its description (sRGB when
+/// there is none or it is not recognised).
+pub fn space_of_icc(icc: &[u8]) -> pe_colour::ColorSpace {
+    use pe_colour::ColorSpace;
+    // Descriptions are ASCII (ICC v2 'desc') or UTF-16BE (v4 'mluc').
+    let has = |name: &str| {
+        let ascii = name.as_bytes();
+        let utf16: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        icc.windows(ascii.len())
+            .any(|w| w.eq_ignore_ascii_case(ascii))
+            || icc.windows(utf16.len()).any(|w| w == utf16.as_slice())
+    };
+    if has("Display P3") || has("P3 D65") {
+        ColorSpace::DisplayP3
+    } else if has("Adobe RGB") || has("AdobeRGB") {
+        ColorSpace::AdobeRgb
+    } else if has("ProPhoto") || has("ROMM") {
+        ColorSpace::ProPhoto
+    } else {
+        ColorSpace::Srgb
+    }
+}
+
+/// Decode an already-rendered picture (JPEG) to linear light in its own colour space, as a frame
+/// with neutral white balance and [`RawFrame::rendered`] set.
+pub fn decode_rendered(path: &Path) -> Result<RawFrame, RawError> {
+    use image::ImageDecoder;
+    let err = |e: &dyn std::fmt::Display| RawError::Decoder(e.to_string());
+    let file = std::fs::File::open(path).map_err(|e| err(&e))?;
+    let mut dec = image::codecs::jpeg::JpegDecoder::new(std::io::BufReader::new(file))
+        .map_err(|e| err(&e))?;
+    let icc = dec.icc_profile().ok().flatten();
+    let img = image::DynamicImage::from_decoder(dec)
+        .map_err(|e| err(&e))?
+        .to_rgb8();
+    let space = icc
+        .as_deref()
+        .map(space_of_icc)
+        .unwrap_or(pe_colour::ColorSpace::Srgb);
+    let lut: Vec<f32> = (0..256).map(|v| space.decode(v as f32 / 255.0)).collect();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let data = img
+        .into_raw()
+        .into_iter()
+        .map(|v| lut[v as usize])
+        .collect();
+    let to_xyz = space.to_xyz_d65();
+    let xyz_to_cam = pe_colour::invert(&to_xyz)
+        .ok_or_else(|| RawError::Unsupported("colour space matrix".into()))?;
+    let m = meta::image_metadata(path);
+    Ok(RawFrame {
+        make: m.make.clone().unwrap_or_default(),
+        model: m.model.clone().unwrap_or_default(),
+        width: w,
+        height: h,
+        layout: Layout::LinearRgb,
+        data,
+        wb: [1.0, 1.0, 1.0],
+        xyz_to_cam,
+        orientation: m.orientation,
+        scale: 1.0,
+        lens: m.lens.clone().map(|name| LensInfo {
+            name,
+            focal_length: m.focal_length.unwrap_or(0.0) as f32,
+            aperture: m.f_number.unwrap_or(0.0) as f32,
+        }),
+        rendered: true,
+    })
 }
 
 fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
@@ -251,6 +328,7 @@ fn from_rawler(img: rawler::RawImage) -> Result<RawFrame, RawError> {
         orientation: orientation_code(&img.orientation),
         scale: 1.0,
         lens: None,
+        rendered: false,
     })
 }
 

@@ -100,6 +100,7 @@ final class DevelopModel: ObservableObject {
         commit(label: "Crop")
     }
 
+    /// Raw (scene-referred) rather than an already-rendered JPEG.
     var isRaw: Bool { !["jpg", "jpeg"].contains((item.path as NSString).pathExtension.lowercased()) }
 
     init(item: ImageItem, core: Core, onCommitted: @escaping (Int64) -> Void) {
@@ -115,7 +116,6 @@ final class DevelopModel: ObservableObject {
 
     /// Decode the photo once for interactive editing, then render.
     func load() async {
-        guard isRaw else { loading = false; return }
         let path = item.path
         preview = await Task.detached(priority: .userInitiated) { PreviewImage(path: path, longEdge: 2048) }.value
         preview?.attachRasters(core: core, imageId: item.id)
@@ -225,10 +225,6 @@ struct DevelopPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 header
-                if !model.isRaw {
-                    Text("Editing JPEG files is not supported yet; adjustments apply to raw files.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
                 section("White Balance") { whiteBalance }
                 collapsible("Masks") { MaskPanel(model: model) }
                 ForEach(sectionNames, id: \.self) { name in
